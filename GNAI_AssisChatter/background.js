@@ -14,9 +14,15 @@ const BRIDGE_CONFIG = {
 };
 
 const SYSTEM_PROMPTS = {
-  "zh-TW": "你是一位專業且友善的 GNAI 助理。請使用繁體中文回答，優先基於使用者提供的網頁內容進行分析與問答。",
+  "zh-TW": "你是一位專業且友善的 GNAI 助理。你必須全程使用繁體中文回答。若你原本想到的內容不是繁體中文，請先轉譯為自然的繁體中文再輸出。除非使用者明確要求，避免使用其他語言。優先基於使用者提供的網頁內容進行分析與問答。",
   "en": "You are a professional and helpful GNAI assistant. Answer in clear English and prioritize the provided webpage context."
 };
+
+let preparedLanguage = "zh-TW";
+
+function normalizeLanguage(language) {
+  return language === "en" ? "en" : "zh-TW";
+}
 
 async function getConfig() {
   const stored = await chrome.storage.local.get({ language: "zh-TW" });
@@ -27,7 +33,7 @@ async function getConfig() {
     gnaiAssistant: BRIDGE_CONFIG.gnaiAssistant,
     gnaiTemperature: BRIDGE_CONFIG.gnaiTemperature,
     gnaiMaxTokens: BRIDGE_CONFIG.gnaiMaxTokens,
-    language: String(stored.language || "zh-TW").trim()
+    language: normalizeLanguage(String(stored.language || "zh-TW").trim())
   };
 }
 
@@ -135,6 +141,22 @@ async function callGnai(messages, language, config) {
   return detailed.content;
 }
 
+async function prepareLanguagePreference(language, config) {
+  const targetLanguage = normalizeLanguage(language);
+  const warmupMessages = [
+    {
+      role: "user",
+      content:
+        targetLanguage === "zh-TW"
+          ? "請僅回覆：已切換為繁體中文模式"
+          : "Reply exactly: English mode enabled"
+    }
+  ];
+
+  await callGnaiDetailed(warmupMessages, targetLanguage, config);
+  preparedLanguage = targetLanguage;
+}
+
 async function debugBridgeConnection(config) {
   const healthChecks = [];
   const healthCandidates = buildHealthCandidates(config.gnaiBaseUrl);
@@ -159,7 +181,7 @@ async function debugBridgeConnection(config) {
   }
 
   const pingMessages = [{ role: "user", content: "ping" }];
-  const pingResult = await callGnaiDetailed(pingMessages, config.language || "zh-TW", config);
+  const pingResult = await callGnaiDetailed(pingMessages, normalizeLanguage(config.language || "zh-TW"), config);
 
   return {
     bridgeBaseUrl: config.gnaiBaseUrl,
@@ -217,7 +239,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         const config = await getConfig();
-        const detailed = await callGnaiDetailed(message.messages || [], message.language || "zh-TW", config);
+        const effectiveLanguage = normalizeLanguage(message.language || preparedLanguage || config.language || "zh-TW");
+        const detailed = await callGnaiDetailed(message.messages || [], effectiveLanguage, config);
         sendResponse({
           ok: true,
           result: detailed.content,
@@ -229,6 +252,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       } catch (err) {
         sendResponse({ ok: false, error: err.message || String(err), attempts: err.attempts || [] });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "PREPARE_CONNECTION") {
+    (async () => {
+      try {
+        const config = await getConfig();
+        const targetLanguage = normalizeLanguage(message.language || config.language || "zh-TW");
+        await prepareLanguagePreference(targetLanguage, config);
+        sendResponse({ ok: true, language: preparedLanguage });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message || String(err) });
       }
     })();
     return true;

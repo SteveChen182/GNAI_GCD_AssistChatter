@@ -25,6 +25,7 @@
     }
     .header-title { font-size: 16px; font-weight: 700; }
     .header-controls { display: flex; gap: 8px; align-items: center; }
+    .feature-hidden { display: none !important; }
     .btn, .selector {
       border: 1px solid rgba(255, 255, 255, 0.3);
       background: rgba(255, 255, 255, 0.18);
@@ -158,8 +159,8 @@
   <div class="header-bar">
     <div class="header-title">💬 GNAI AssisChatter</div>
     <div class="header-controls">
-      <button id="loadPageBtn" class="btn">載入網頁</button>
-      <button id="loadClipboardBtn" class="btn">載入剪貼簿</button>
+      <button id="loadPageBtn" class="btn feature-hidden">載入網頁</button>
+      <button id="loadClipboardBtn" class="btn feature-hidden">載入剪貼簿</button>
       <button id="debugBtn" class="btn">Debug 連線</button>
       <button id="clearBtn" class="btn">清除對話</button>
       <select id="languageSelect" class="selector" aria-label="Language">
@@ -183,7 +184,7 @@
     <div id="messages" class="messages">
       <div class="empty-state">
         <div class="empty-title">開始對話</div>
-        <div class="empty-text">先按「載入網頁」或「載入剪貼簿」，再詢問內容相關問題。</div>
+        <div class="empty-text">請直接輸入問題開始對話。</div>
       </div>
     </div>
 

@@ -14,12 +14,13 @@ const TRANSLATIONS = {
     loadFailed: "載入失敗",
     sendFailed: "發送失敗",
     debugConn: "Debug 連線",
-    debugRunning: "除錯檢查中...",
-    debugDone: "除錯完成",
-    debugFailed: "除錯失敗",
+    debugRunning: "ＧＮＡＩ連線檢查中...",
+    debugDone: "連線測試完成",
+    debugFailed: "連線測試失敗",
+    debugSuccess: "連線測試成功",
     debugTitle: "Bridge 除錯結果",
     titleStart: "開始對話",
-    textStart: "先按「載入網頁」或「載入剪貼簿」，再詢問內容相關問題。",
+    textStart: "請直接輸入問題開始對話。",
     inputPlaceholder: "輸入您的問題..."
   },
   "en": {
@@ -40,9 +41,10 @@ const TRANSLATIONS = {
     debugRunning: "Running diagnostics...",
     debugDone: "Diagnostics complete",
     debugFailed: "Diagnostics failed",
+    debugSuccess: "Connection test successful",
     debugTitle: "Bridge Debug Result",
     titleStart: "Start conversation",
-    textStart: "Load page/clipboard first, then ask about the content.",
+    textStart: "Type your question to start the conversation.",
     inputPlaceholder: "Type your question..."
   }
 };
@@ -164,6 +166,10 @@ async function debugConnection() {
     });
 
     if (!response?.ok) {
+      if (response?.details) {
+        addSystemMessage(formatDebugDetails(response.details));
+      }
+
       const lines = [
         `== ${t("debugTitle")} ==`,
         `error: ${response?.error || "Unknown error"}`
@@ -180,7 +186,7 @@ async function debugConnection() {
       return;
     }
 
-    addSystemMessage(formatDebugDetails(response.details || {}));
+    addSystemMessage(t("debugSuccess"));
     setStatus("ready", t("debugDone"));
   } catch (err) {
     addSystemMessage(`== ${t("debugTitle")} ==\nerror: ${err.message || String(err)}`);
@@ -207,6 +213,22 @@ function showPageInfo(title, url) {
 
 function hidePageInfo() {
   document.getElementById("pageInfo").classList.remove("show");
+}
+
+async function prepareConnectionLanguage() {
+  try {
+    await new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "PREPARE_CONNECTION",
+          language: currentLanguage
+        },
+        () => resolve()
+      );
+    });
+  } catch (_) {
+    // Warmup is best-effort; chat flow can still continue even if it fails.
+  }
 }
 
 async function loadPage() {
@@ -265,18 +287,17 @@ function buildApiMessages(userQuestion) {
     return [...messages, { role: "user", content: userQuestion }];
   }
 
-  const context = `Page Title: ${pageContent.title}\nPage URL: ${pageContent.url}\n\nPage Content:\n${pageContent.text}`;
+  const isZh = currentLanguage === "zh-TW";
+  const context = isZh
+    ? `頁面標題: ${pageContent.title}\n頁面網址: ${pageContent.url}\n\n頁面內容:\n${pageContent.text}`
+    : `Page Title: ${pageContent.title}\nPage URL: ${pageContent.url}\n\nPage Content:\n${pageContent.text}`;
+  const questionPrefix = isZh ? "使用者問題" : "User Question";
 
   if (messages.length === 0) {
-    return [{ role: "user", content: `${context}\n\nUser Question: ${userQuestion}` }];
+    return [{ role: "user", content: `${context}\n\n${questionPrefix}: ${userQuestion}` }];
   }
 
-  return [
-    { role: "user", content: context },
-    { role: "assistant", content: "I have the page content context. Please continue." },
-    ...messages,
-    { role: "user", content: userQuestion }
-  ];
+  return [...messages, { role: "user", content: `${context}\n\n${questionPrefix}: ${userQuestion}` }];
 }
 
 async function sendMessage() {
@@ -345,6 +366,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   languageSelect.value = currentLanguage;
   applyLanguage();
   applyFontSize(stored.chatFontSize);
+  await prepareConnectionLanguage();
 
   document.getElementById("loadPageBtn").addEventListener("click", loadPage);
   document.getElementById("loadClipboardBtn").addEventListener("click", loadClipboard);
@@ -365,6 +387,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   languageSelect.addEventListener("change", async () => {
     currentLanguage = languageSelect.value;
     await chrome.storage.local.set({ language: currentLanguage });
+    await prepareConnectionLanguage();
     applyLanguage();
     setStatus("ready", t("ready"));
   });
