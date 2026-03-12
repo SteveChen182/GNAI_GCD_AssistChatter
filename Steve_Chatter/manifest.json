@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Chatter",
+  "version": "1.0.1",
+  "description": "Ask questions about web pages using Azure OpenAI. Chat with any webpage content in multiple languages.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "sidePanel",
+    "clipboardRead"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "Chatter - Chat with Webpage"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}

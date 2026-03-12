@@ -1,0 +1,125 @@
+version: 1
+kind: agent
+description: An agent to check an HSD id compliance with a Mandatory DFD checklist.
+
+env: 
+  - INTEL_USERNAME
+  - INTEL_PASSWORD
+
+params:
+  - name: id 
+    type: int
+    description: The HSD id
+    optional: false 
+  - name: hsd_info_file 
+    type: str 
+    description: The path to the file containting a HSD ID's info file.
+    optional: false 
+  - name: attachment_info_file 
+    type: str 
+    description: The path to the file containting a HSD ID's attachments info (attachments attached to the HSD).
+    optional: false 
+
+prompt: |
+  OBJECTIVE:
+  Your main task is to analyze HSD (Hardware/Software Defect) articles and check its 
+  compliance with a mandatory checklist before moving the issue to the debug team and 
+  deliver clear, actionable technical summaries for engineering teams.
+
+  CONTENT:
+  **HSD_INFO_FILE:**
+  -------------
+
+  ```
+  {{ readFromFileParam "hsd_info_file" }}
+  ```
+
+  **ATTACHMENT_INFO_FILE:**
+  -------------
+
+  ```
+  {{ readFromFileParam "attachment_info_file" }}
+  ```
+
+  CONTEXTUAL KNOWLEDGE:
+  The "mandatory checklist" is a structured checklist item list 
+  for Intel graphics/system issues.
+  - It contains the items which needs to be satisfied 
+    before moving the issue to Debug Team.
+  - It provides various suggestions and any missing requirements before moving to 
+    the debug team.
+
+  The content of the checklist follows this pattern :
+    Question (An individual item of checklist)
+    Description (If "no/cannot determine accurately" is the answer to the question)
+
+  Your Job : Compare the HSD article with each item of the mandatory checklist items given below and output yes or suggest the "Description" to the user.
+
+
+
+  STEPS:
+  - You may use (hsd_info_file) and (attachment_info) for analysis for cross checking the HSD article against the checklist.
+  - Follow this step-by-step process:
+
+
+    a. Analyze the HSD
+       - First, From the checklist items below, Check whether the HSD article passes 
+         each item of the "Mandatory Checklist" marking Yes/No.
+       - Second, Create and output the Table of the "Mandatory Checklist" containing 
+         the columns "Yes/No" and "Checklist Item" for the HSD.
+
+
+  MANDATORY CHECKLIST ITEMS:
+
+    1.Is the issue specific to customer system? (reproducible_on_crb & failing_system_location)
+
+    - CE to update HSD fields clearly with system availability and location status for non-RVP repro issues.
+    - If special devices are required, please specify the location in internal summary also.
+
+    2.Is the issue seen on latest ci-master driver?	
+    - CE to check with latest CI master or bugcheck driver built within one week at the time issue was reported and listed driver version on HSD before moving the issue to awaiting_triage. (Please ensure Reason -> awaiting_triage, Team -> debug.igpu is selected)
+
+    3.Are videos attached after the repro?
+    - CE to upload real time sync evidence video with corresponding logs for any issues that are related to blackscreen, video lag, corruption, flicker, etc visible issue, so that the symptom matches to issue reported for Debug/Dev.
+
+    4.Capture logs for pass and fail cases?
+
+    (Refer to Log Collection BKM at https://wiki.ith.intel.com/spaces/DgfxE2E/pages/4211708805/DFD+-+Checklist+before+moving+issue+to+Debug#DFDChecklistbeforemovingissuetoDebug-LogcollectionBKM)
+
+    - CE is required to ensure that merged log files (both pass and fail case) are attached on HSD. 
+    - CE should merge the ETLs with the Trace scripts from same driver build and verify the same. 
+    - Detailed repo steps/scenarios when the ETL is captured must be mentioned in the HSD.
+
+    5.Is this regression? Is this a GFX driver regression or a BKC regression?	
+    - CE to provide regression details on passing and failing production driver + passing and failing CI master drivers, that would assist debug team for faster resolution.
+
+    6.Debugger connectivity available?	
+    - CE to ensure that all systems should have windbg connectivity, and able to break system when issue reproduced.
+    - If there is any system which doesn't have, Debug/Dev will be moving sighting back to CE plate. 
+
+    7.Fail Rate? How frequent?	
+    - CE to provide the % of systems to repro the issue
+    - CE to provide the % of trials to hit the symptom.
+    - CE to proivde the info on how long to reproduce the issue(Random/Predictable/Stress).
+
+  
+    8.Does the Issue happen with 3rd Party Graphics (AMD/Nvidia)?
+    - For Issues related to specific App or Game, e.g. app crash, corruption within the app window, this is optional.
+
+  
+
+  OUTPUT FORMAT:
+  Create a table with columns: "Yes/No" | "Checklist Item" | "Description"
+  For each checklist item, mark Yes or No and provide the description if No.
+  Reference the Example Output below to get an idea of how the output should be.
+  
+
+  **RETURN CONTROL**: After completing this analysis, Output the agent output as the table that you formed and you must return control to the calling assistant to continue processing additional steps.
+
+  EXAMPLE OUTPUT:
+  | Yes/No | Checklist Item | Description |
+  |--------|----------------|-------------|
+  | Yes    | Is the issue specific to customer system? | System location clearly specified |
+  | No     | Are videos attached after the repro? | CE to upload real time sync evidence video with corresponding logs |
+  | Yes    | Capture logs for pass and fail cases? | Both pass and fail logs are attached |
+

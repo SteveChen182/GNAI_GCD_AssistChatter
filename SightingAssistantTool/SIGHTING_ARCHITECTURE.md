@@ -1,0 +1,467 @@
+﻿# Sighting Assistant Tool  Architecture & Requirements
+
+This document describes the architecture, requirements status, and runtime internals of the **SightingAssistantTool** GNAI local toolkit.
+
+> For GNAI framework guidelines, naming conventions, and YAML schemas, see [CLAUDE.md](CLAUDE.md).
+> Source: Intel Confluence  *Sighting Assistant Tool Requirement Spec.*
+
+---
+
+## 1. Introduction
+
+Sighting Assistant Tool is a [GNAI Toolkit](https://gpusw-docs.intel.com/services/gnai/) that combines enterprise-grade LLMs (GPT, Claude) with Intel's internal knowledge sources  documentation, wikis, bspecs  and integrates with HSD-ES to enable Graphics Debug Engineers to accelerate issue resolution, gain deeper insights, and begin the debug process with a stronger starting point.
+
+**Repository:** [intel-sandbox/SightingAssistantTool](https://github.com/intel-sandbox/SightingAssistantTool)
+
+---
+
+## 2. Target User
+
+**Graphic Debug Engineer**
+
+---
+
+## 3. User Scenarios
+
+1. Ask Sighting Assistant to analyze an issue and provide guidance for issue isolation.
+2. Ask Sighting Assistant to read an HSD query (e.g. all 999 issues) and check whether the sighting includes required logs and traces depending on the type of sighting.
+
+```bash
+dt gnai ask "What is the summary of HSD id 15018275324" --assistant sighting_assistant
+```
+
+---
+
+## 4. Requirements Status
+
+| # | Requirement | Status |
+|---|-------------|--------|
+| 1 | Read article from HSD | DONE |
+| 2 | Read query from HSD (HSD-ES API) | TBD |
+| 3 | Categorize issue from title, description, repo steps, comments | ONGOING |
+| 4 | Analyze attachments and comments for required logs | ONGOING |
+| 4a | ETL log analysis (Display ETL, Boot Trace, WPT, GPUView) | DONE |
+| 4b | GOP log analysis | DONE |
+| 4c | BSOD/TDR dump analysis via Sherlog | DONE |
+| 4d | SNS results.csv analysis via GATS portal API | TBD |
+| 4e | Triage Checklist compliance check | TBD |
+| 4f | GVE Errata/Expected Behavior reference | TBD |
+| 4g | Differentiate log type and update HSD description field | DONE |
+| 4h | Display Debugger integration (GOP + ETL) | DONE |
+| 4i | MeAna tool integration (GPUView logs) | TBD |
+| 4j | Dispdiag tool integration (Dispdiag.dat) | TBD |
+| 5 | Provide analysis result and suggestion | DONE |
+| 6 | Prompt triage BKM to user according to issue type, post on HSD | ONGOING |
+
+---
+
+## 5. Issue Categories
+
+sighting_get_category classifies issues into one of:
+
+  Display, Display Audio, Gaming, Media, Content Protection, Performance,
+  Corruption, BSOD, TDR, Underrun, App Crash, Hard Hang, Black Screen,
+  Yellow Bang, WHQL, IGCC/IGS/ARC, GOP, DPMO, Installer, AI
+
+Category determines which BKM tool is invoked in Phase 2 (see Section 7).
+
+---
+
+## 6. High-Level Tool Execution Flow
+
+```
+User: "Analyze HSD 14026871374"
+         |
+         v
++---------------------------------------------+
+|          PHASE 1 - Data Gathering           |
+|                                             |
+|  1. sighting_read_article                   |
+|     writes -> hsd_info_file                 |
+|  2. sighting_attachments                    |
+|     writes -> attachment_info_file          |
+|               all_log_txt_files.json        |
+|               extracted_*/                  |
+|               persistent_logs/              |
+|  3. sighting_get_category                   |
+|     reads -> hsd_info_file                  |
+|  4. [if GDHM IDs found]                     |
+|     sighting_sherlog_sync                   |
+|  5. sighting_gop_analyzer                   |
+|     pre: log_file_analyzer.py               |
+|  6. [if display logs found]                  |
+|     sighting_displaydebugger                |
+|     → intelligent analysis_focus from HSD   |
++--------------------+------------------------+
+                     |
+                     v
++---------------------------------------------+
+|          PHASE 2 - Analysis                 |
+|                                             |
+|  7. sighting_mandatory_dfd_analyzer         |
+|  8. [category-specific BKM tool]            |
+|     - sighting_display_bkm                  |
+|     - sighting_media_bkm                    |
+|     - sighting_game_bkm                     |
+|     - sighting_ml_content_bkm               |
+|     - sighting_bsod_tdr_hang_bkm            |
+|     - sighting_yellow_bang_bkm              |
+|  9. sighting_similarity_search              |
++--------------------+------------------------+
+                     |
+                     v
+           Structured 7-Section Report
+```
+
+---
+
+## 7. Category to BKM Tool Routing
+
+| Category | BKM Tool |
+|----------|----------|
+| Display, Display Audio, GOP, Black Screen, Underrun | sighting_display_bkm |
+| Media, GPUView | sighting_media_bkm |
+| Gaming, Corruption, Performance | sighting_game_bkm |
+| AI, Content Protection | sighting_ml_content_bkm |
+| BSOD, TDR, Hard Hang, App Crash | sighting_bsod_tdr_hang_bkm |
+| Yellow Bang, WHQL, IGCC/IGS/ARC, DPMO, Installer, Others | sighting_yellow_bang_bkm |
+
+---
+
+## 8. Detailed Technical Flow
+
+### 8.1 Step 1 - Read Article from HSD-ES
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_read_article.yaml |
+| Type | Command Tool |
+| Script | src/read_article.py |
+| Output | hsd_info_file in GNAI_TEMP_WORKSPACE |
+
+Fetches HSD data fields and comments via HSD-ES API. Output is a JSON structure containing submitted_by, title, comments[], and all article fields. Current scope: single article. Planned: query-based bulk fetching.
+
+---
+
+### 8.2 Step 2 - Issue Categorization
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_get_category.yaml |
+| Type | Agent Tool |
+| Context | hsd_info_file |
+| Output | category parameter for Step 3 |
+
+Classifies into one of the 20 categories in Section 5. Used in Step 3 to determine expected attachment types.
+
+---
+
+### 8.3 Step 3 - Attachment Analysis
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_attachments.yaml |
+| Script | src/check_attachments.py |
+| Output | attachment_info_file, all_log_txt_files.json, extracted_*/, persistent_logs/ |
+
+#### Wave-1: Parsing / Processing of Logs
+
+Processing phases in order:
+1. HSD API Call  hsd.get_attachments_list(hsd_id)
+2. Basic Info Display  numbered list of all attachments pending analysis
+3. Logging Setup  initialize debug logging
+4. Parallel Download  ThreadPoolExecutor (8 workers) with duplicate detection
+5. Archive Extraction  unpacks 7z and zip; categorizes into ETL / LOG / TXT
+6. Analysis  driver info extraction, ETL classification, pipe underrun detection
+7. Shared Index  populates all_log_txt_files.json; copies to persistent_logs/ with <hsd_id>_ prefix
+8. GOP Processing  detects and parses GOP logs; merges results back into attachment structure
+9. Output  dumps to attachment_info_file in GNAI_TEMP_WORKSPACE
+
+If a ZIP contains multiple log types, description uses semicolons: 'Display ETL;GOP'
+
+#### Wave-2: Attachment Sufficiency Decision
+
+Determines whether correct log types are present for the identified issue category.
+
+---
+
+#### A. ETL Log Analysis
+
+Script: src/etl_classifier.py
+
+ETL Classification (priority-based pattern matching):
+
+| Type | Detection Logic |
+|------|----------------|
+| BootTrace | Contains DxgkDdiStartDevice  early exit |
+| WPT | Intel Graphics + Media patterns |
+| Display ETL | Intel Graphics patterns only |
+| GPUView | Media patterns only |
+| Unknown | No significant patterns |
+
+Driver Information Extracted:
+
+| Field | Method |
+|-------|--------|
+| Build Type: Release | BuildString contains "(R)" |
+| Build Type: Release Internal | BuildString contains "RI" |
+| Version (Release) | From Version field |
+| Version (RI) | Parsed from BuildString |
+| Build Date | From Version field (date,version format) |
+| Pipe Underrun | DispPipeUnderRun pattern matching |
+
+Performance features: 1MB chunked processing, early exit for boot traces, content-hash caching, ProcessPoolExecutor with ThreadPoolExecutor fallback.
+
+Manifests: src/manifests/  .man files passed to tracefmt.exe to decode binary ETL event data.
+
+---
+
+#### B. GOP Log Analysis
+
+Script: src/log_file_analyzer.py
+
+Classes:
+- LogProcessor  abstract base class
+- GOPLogProcessor  GOP log detection and parsing
+
+Version Detection:
+
+| GOP Version | Patterns |
+|-------------|----------|
+| New GOP | [IntelGOP], [InteluGOP], [IntelPEIM]  version from PeiGraphicsEntryPoint |
+| Old GOP | [INFO] patterns  version from PreMem PEI Module |
+
+Key Metrics Extracted (40+ pattern types):
+
+| Metric | Detail |
+|--------|--------|
+| Link Training Status | Full Link Training (FLT) and Fast Link Training success/failure |
+| Clock Recovery (CR) | Cycles, status, same_req |
+| Channel Equalization (EQ) | Cycles, status, performance metrics |
+| Display Mode Setting | Resolution (X/Y), pipe, Display ID |
+| Frame Buffer Config | Max vs calculated sizes (MB), occurrence count |
+| T-Values | T3, T5, T8, T10, DPCD timeout (New GOP only) |
+| Display Capabilities | Supported features, lane count |
+| Display Status | Connected display + Display ID |
+| Last Successful Config | Lane count, VSwing, Pre-emphasis (Old GOP only) |
+| Event Grouping | CR -> EQ -> LT sequences |
+| Display ID Decoding | Hex -> Port, Instance, Connector, Reserved |
+
+---
+
+#### C. GDHM BSOD/TDR Dumps via Sherlog
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_sherlog_sync.yaml |
+| Script | src/sherlog_subprocess.py |
+| Repo | intel-innersource/drivers.gpu.core.sherlog-toolkit |
+
+Invoked when GDHM dump IDs are found. Extracts all GDHM IDs (10-digit numbers, GDHM URLs, "GDHM dump X", "dump ID: X") from article content and runs Sherlog per ID.
+
+---
+
+#### D. DisplayDebugger Analysis (GOP + ETL Deep Analysis)
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_displaydebugger.yaml |
+| Type | Command Tool |
+| Script | src/displaydebugger_subprocess.py |
+| Repo | intel-sandbox/displaydebugger |
+| Integration | Subprocess (`gnai ask --assistant=displaydebugger`) |
+
+Invoked when display-related logs (GOP or ETL) are found in attachments AND the HSD describes a display-related issue. The sighting_assistant constructs an **intelligent analysis_focus** based on HSD context:
+
+| HSD Issue Pattern | analysis_focus Constructed |
+|-------------------|---------------------------|
+| Display not detected | "display detection and initialization sequence" |
+| Modeset failure | "modeset and timing configuration" |
+| Link training error | "link training and display connectivity" |
+| Hotplug issue | "hotplug detection and handling" |
+| HDCP failure | "HDCP authentication and key exchange" |
+| Power/sleep issue | "power state transitions and display power management" |
+| EDID problem | "EDID reading and display information" |
+| Type-C/Alt Mode | "Type-C and Alt Mode configuration" |
+| Panel issue | "panel initialization and embedded display" |
+| Output/signal issue | "display output and signal issues" |
+
+**Log Type Detection:**
+- GOP logs: `.txt`/`.log` files with "boot", "gop", "uefi", "preos", "bios" in filename
+- ETL logs: `.etl`, `.7z`, `.zip` files or filenames containing "gfxtrace"
+
+**Execution Model:**
+- Opens a separate CMD window per log file (like sherlog)
+- Uses `gnai ask --log-file=<path> --assistant=displaydebugger` for native output capture
+- stdin stays connected — user can interact with follow-up prompts and HSD upload
+- Uses `/wait` + `process.wait()` for deterministic completion detection
+- Output saved to `.output/displaydebugger_{hsd_id}_{filename}_analysis.txt`
+
+**Parameters:**
+- `hsd_id` — HSD ID being analyzed
+- `hsd_info_file` — path to HSD article info (optional)
+- `attachment_info_file` — path to attachment info (optional)
+- `log_files` — list of display log file paths
+- `analysis_focus` — intelligent focus string constructed by the assistant
+
+---
+
+### 8.4 Step 4 - Similar HSDs
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_similarity_search.yaml |
+| Script | src/similarity_search.py |
+
+Returns top 5 most similar past HSDs with confidence scores.
+
+---
+
+### 8.5 Step 5 - Summary Generation and Final Output
+
+| Section | Content |
+|---------|---------|
+| 1. Content Extraction & Summary | HSD details, attachments, GOP analysis, driver info, regression, RVP status |
+| 2. Issue Classification | Category, confidence, reasoning |
+| 3. Attachment Verification | Expected vs present vs missing, validity per category |
+| 4. Suggestions as per DFD Checklist | DFD compliance table, BKM output, recommendations |
+| 5. Triage & Troubleshooting Review | Comment analysis, pending actions, next steps |
+| 6. Executive Summary & Recommendations | Priority, escalation, top 5 similar HSDs |
+| 7. Technical Steps & Tool Invocation Log | Full tool trace, error recovery notes |
+
+---
+
+## 9. GNAI_TEMP_WORKSPACE Layout
+
+GNAI creates a session-scoped temp directory at:
+  %LOCALAPPDATA%\Temp\gnai-chat\<session-uuid>\
+
+Observed layout (verified 2026-02-18):
+
+```
+$GNAI_TEMP_WORKSPACE/
+ hsd_info_file                         <- sighting_read_article output
+ attachment_info_file                  <- sighting_attachments output
+ all_log_txt_files.json                <- index of all log/txt files
+ messages.json                         <- GNAI internal - DO NOT TOUCH
+ extracted_<attachment_id_1>/          <- named by attachment ID (numeric)
+    SKU1-4 Burnin GPGPU FAIL/
+        XiaoXin_14SE_..._2025_12_25.zip
+ extracted_<attachment_id_2>/
+    BIT_log.trace
+    Bit_Gpgpu_Error.py
+    IntError_2886.txt
+    IntError_4070.txt
+ persistent_logs/
+     <hsd_id>_<filename_1>.txt         <- hsd_id prefix prevents collisions
+     <hsd_id>_<filename_2>.txt
+     <hsd_id>_<filename_n>.txt
+```
+
+Naming Rules:
+- extracted_<attachment_id>/  named by numeric HSD attachment ID, not filename
+- persistent_logs/<hsd_id>_<original_filename>  prefix prevents name collisions
+- messages.json  GNAI internal; tool scripts must never read or write this
+- Workspace deleted when chat session ends
+
+---
+
+## 10. Tool Inventory
+
+### Command Tools
+
+| Tool YAML | Script | Purpose |
+|-----------|--------|---------|
+| sighting_read_article.yaml | src/read_article.py | Fetch HSD article + comments |
+| sighting_attachments.yaml | src/check_attachments.py | Download, extract, classify attachments |
+| sighting_sherlog_sync.yaml | src/sherlog_subprocess.py | Run Sherlog on GDHM dump IDs |
+| sighting_displaydebugger.yaml | src/displaydebugger_subprocess.py | DisplayDebugger GOP + ETL deep analysis |
+| sighting_similarity_search.yaml | src/similarity_search.py | Top-5 similar past HSDs |
+| sighting_mandatory_dfd_analyzer.yaml |  | DFD checklist compliance |
+| sighting_display_bkm.yaml |  | Display BKM checks |
+| sighting_media_bkm.yaml |  | Media BKM checks |
+| sighting_game_bkm.yaml |  | Game BKM checks |
+| sighting_ml_content_bkm.yaml |  | AI/ML BKM checks |
+| sighting_bsod_tdr_hang_bkm.yaml |  | BSOD/TDR/Hang BKM checks |
+| sighting_yellow_bang_bkm.yaml |  | Other/unknown BKM checks |
+
+### Agent Tools
+
+| Tool YAML | Model | Purpose |
+|-----------|-------|---------|
+| sighting_gop_analyzer.yaml | claude-4-5-opus-thinking | Analyze GOP logs, structured table output |
+| sighting_get_category.yaml |  | Classify issue category |
+
+### Supporting Scripts
+
+| Script | Used By | Purpose |
+|--------|---------|---------|
+| src/etl_classifier.py | check_attachments.py | ETL classification, driver info, pipe underrun |
+| src/log_file_analyzer.py | sighting_gop_analyzer pre-step | GOP log detection and metric extraction |
+| src/hsdes.py | All tools | HSD-ES API client (Kerberos auth, SSL bypass) |
+
+---
+
+## 11. Planned / Future Integrations
+
+| Integration | Purpose | Status |
+|-------------|---------|--------|
+| ~~Display Debugger~~ | ~~Deep GOP + ETL analysis~~ | **DONE** (see 8.3 D) |
+| MeAna | Read GPUView logs | TBD |
+| Dispdiag | Read Dispdiag.dat | TBD |
+| GATS Portal API | SNS results.csv failure analysis | TBD |
+| HSD query bulk read | Bulk triage of 999+ HSDs | TBD |
+| JIRA MCP toolkit | Auto-post summary to JIRA / HSD | TBD |
+| Triage Checklist (7.1) | Compliance check | TBD |
+
+---
+
+## 12. Known Limitations & Open Issues
+
+| # | Issue | Status |
+|---|-------|--------|
+| 1 | console_output: "" on several tools silently drops errors | Open |
+| 2 | No timeout: on sighting_sherlog_sync  may hit platform default | Open |
+| 3 | sighting_gop_analyzer prompt uses non-standard {{.gop_analysis_results}} syntax | Open |
+| 4 | BKM tool selection is LLM-driven; fails silently if sighting_get_category errors | Open |
+| 5 | Burnin log analyzer skill (SGQE-21307)  sub-agent cannot run Python, redesigned | PR #16 open |
+| 6 | ~~Cross-toolkit transfer (Display Debugger)~~ | **DONE** — validated with `gnai --log-file` pattern |
+
+---
+
+## 13. Glossary
+
+| Term | Definition |
+|------|------------|
+| HSD | Hardware Sighting Document  Intel internal bug tracker |
+| HSD-ES | HSD Enterprise System  API-accessible version |
+| GDHM | Graphics Driver Hardware Module  crash dump format |
+| GOP | Graphics Output Protocol  UEFI-level display firmware |
+| ETL | Event Trace Log  Windows kernel-level trace file |
+| WPT | Windows Performance Toolkit trace |
+| GPUView | GPU activity trace viewer log format |
+| DFD | Debug From Day-1  Intel GPU debug standard |
+| BKM | Best Known Method  documented debug checklist |
+| TDR | Timeout Detection and Recovery  GPU hang recovery |
+| Sherlog | Intel internal tool for GDHM BSOD/TDR dump analysis |
+| SNS | Silicon Needs System  validation results tracker |
+| GATS | GPU Automated Test System portal |
+| SAT | Sighting Assistant Tool (this toolkit) |
+
+---
+
+## 14. References
+
+- GNAI Toolkit Docs: https://gpusw-docs.intel.com/services/gnai/
+- HSD-ES API: https://wiki.ith.intel.com/display/HSDESWIKI/HSD-ES+API
+- DFD Checklist: https://wiki.ith.intel.com/spaces/DgfxE2E/pages/4211708805
+- Sherlog Toolkit: https://github.com/intel-innersource/drivers.gpu.core.sherlog-toolkit
+- Display Debugger: https://github.com/intel-sandbox/displaydebugger
+- E2E SNS: https://wiki.ith.intel.com/spaces/DgfxE2E/pages/4257710574/E2E+SNS
+- 7.1 Triage Checklist: https://wiki.ith.intel.com/spaces/DgfxE2E/pages/4257710585/7.1+Triage+Checklist
+- GVE Errata: https://wiki.ith.intel.com/spaces/PEGVPGGID/pages/1853443761
+- GNAI MCP Toolkits: https://gpusw-docs.intel.com/services/gnai/developer/toolkits/
+
+---
+
+*Last updated: 2026-02-26*
