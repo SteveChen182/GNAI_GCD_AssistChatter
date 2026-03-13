@@ -13,27 +13,19 @@ const BRIDGE_CONFIG = {
   gnaiMaxTokens: 2000
 };
 
-const SYSTEM_PROMPTS = {
-  "zh-TW": "你是一位專業且友善的 GNAI 助理。你必須全程使用繁體中文回答。若你原本想到的內容不是繁體中文，請先轉譯為自然的繁體中文再輸出。除非使用者明確要求，避免使用其他語言。優先基於使用者提供的網頁內容進行分析與問答。",
-  "en": "You are a professional and helpful GNAI assistant. Answer in clear English and prioritize the provided webpage context."
-};
-
-let preparedLanguage = "zh-TW";
-
-function normalizeLanguage(language) {
-  return language === "en" ? "en" : "zh-TW";
-}
+const ENGLISH_SYSTEM_PROMPT = "You are a professional and helpful GNAI assistant. Answer in clear English and prioritize the provided webpage context.";
+let activeChatController = null;
+let activeStreamController = null;
+let activeStreamPort = null;
 
 async function getConfig() {
-  const stored = await chrome.storage.local.get({ language: "zh-TW" });
   return {
     gnaiBaseUrl: BRIDGE_CONFIG.gnaiBaseUrl,
     gnaiApiKey: BRIDGE_CONFIG.gnaiApiKey,
     gnaiModel: BRIDGE_CONFIG.gnaiModel,
     gnaiAssistant: BRIDGE_CONFIG.gnaiAssistant,
     gnaiTemperature: BRIDGE_CONFIG.gnaiTemperature,
-    gnaiMaxTokens: BRIDGE_CONFIG.gnaiMaxTokens,
-    language: normalizeLanguage(String(stored.language || "zh-TW").trim())
+    gnaiMaxTokens: BRIDGE_CONFIG.gnaiMaxTokens
   };
 }
 
@@ -66,7 +58,22 @@ function buildEndpointCandidates(baseUrl) {
   return [...new Set(candidates)];
 }
 
-async function callGnaiDetailed(messages, language, config) {
+function buildStreamEndpointCandidates(baseUrl) {
+  const normalized = String(baseUrl || "").trim().replace(/\/+$/, "");
+  if (!normalized) return [];
+
+  const hasVersionSuffix = /\/v\d+$/i.test(normalized);
+  const v1Base = hasVersionSuffix ? normalized : `${normalized}/v1`;
+
+  const candidates = [
+    `${v1Base}/chat/completions/stream`,
+    `${normalized}/chat/completions/stream`
+  ];
+
+  return [...new Set(candidates)];
+}
+
+async function callGnaiDetailed(messages, language, config, options = {}) {
   if (!config.gnaiBaseUrl) {
     throw new Error("GNAI bridge base URL 設定缺失，請檢查 background.js。");
   }
@@ -76,16 +83,16 @@ async function callGnaiDetailed(messages, language, config) {
     throw new Error("無效的 GNAI Base URL");
   }
 
-  const systemPrompt = SYSTEM_PROMPTS[language] || SYSTEM_PROMPTS["zh-TW"];
   const payload = {
     model: config.gnaiModel,
-    messages: [{ role: "system", content: systemPrompt }, ...messages],
+    messages: [{ role: "system", content: ENGLISH_SYSTEM_PROMPT }, ...messages],
     temperature: Number.isFinite(config.gnaiTemperature) ? config.gnaiTemperature : 0.3,
     max_tokens: Number.isFinite(config.gnaiMaxTokens) ? config.gnaiMaxTokens : 2000,
     assistant: config.gnaiAssistant
   };
 
   let lastError = "";
+  let lastDetails = null;
   const attempts = [];
 
   for (const url of endpoints) {
@@ -102,14 +109,43 @@ async function callGnaiDetailed(messages, language, config) {
       const response = await fetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: options.signal
       });
 
       attempts.push({ endpoint: url, status: response.status, ok: response.ok });
 
       if (!response.ok) {
         const text = await response.text().catch(() => "");
-        lastError = `API error ${response.status} at ${url}: ${text}`;
+        let parsed = null;
+        try {
+          parsed = text ? JSON.parse(text) : null;
+        } catch (_) {
+          parsed = null;
+        }
+
+        if (parsed && typeof parsed === "object") {
+          lastDetails = {
+            endpoint: url,
+            status: response.status,
+            error: parsed.error,
+            assistant: parsed.assistant,
+            dtSource: parsed.dt_source,
+            durationMs: parsed.duration_ms,
+            returnCode: parsed.return_code,
+            stdout: parsed.stdout,
+            stderr: parsed.stderr,
+            hint: parsed.hint
+          };
+          lastError = `API error ${response.status} at ${url}: ${parsed.error || "Unknown bridge error"}`;
+        } else {
+          lastDetails = {
+            endpoint: url,
+            status: response.status,
+            rawBody: text
+          };
+          lastError = `API error ${response.status} at ${url}: ${text}`;
+        }
         continue;
       }
 
@@ -126,6 +162,16 @@ async function callGnaiDetailed(messages, language, config) {
         attempts
       };
     } catch (err) {
+      if (err?.name === "AbortError") {
+        const abortError = new Error("使用者已取消請求");
+        abortError.isCancelled = true;
+        abortError.attempts = attempts;
+        abortError.details = {
+          endpoint: url,
+          cancelled: true
+        };
+        throw abortError;
+      }
       lastError = `${url}: ${err.message || String(err)}`;
       attempts.push({ endpoint: url, error: err.message || String(err), ok: false });
     }
@@ -133,6 +179,7 @@ async function callGnaiDetailed(messages, language, config) {
 
   const error = new Error(lastError || "呼叫 GNAI 失敗");
   error.attempts = attempts;
+  error.details = lastDetails;
   throw error;
 }
 
@@ -141,21 +188,229 @@ async function callGnai(messages, language, config) {
   return detailed.content;
 }
 
-async function prepareLanguagePreference(language, config) {
-  const targetLanguage = normalizeLanguage(language);
-  const warmupMessages = [
-    {
-      role: "user",
-      content:
-        targetLanguage === "zh-TW"
-          ? "請僅回覆：已切換為繁體中文模式"
-          : "Reply exactly: English mode enabled"
-    }
-  ];
+async function callGnaiStream(messages, language, config, options = {}) {
+  if (!config.gnaiBaseUrl) {
+    throw new Error("GNAI bridge base URL 設定缺失，請檢查 background.js。");
+  }
 
-  await callGnaiDetailed(warmupMessages, targetLanguage, config);
-  preparedLanguage = targetLanguage;
+  const endpoints = buildStreamEndpointCandidates(config.gnaiBaseUrl);
+  if (endpoints.length === 0) {
+    throw new Error("無效的 GNAI Base URL");
+  }
+
+  const payload = {
+    model: config.gnaiModel,
+    messages: [{ role: "system", content: ENGLISH_SYSTEM_PROMPT }, ...messages],
+    temperature: Number.isFinite(config.gnaiTemperature) ? config.gnaiTemperature : 0.3,
+    max_tokens: Number.isFinite(config.gnaiMaxTokens) ? config.gnaiMaxTokens : 2000,
+    assistant: config.gnaiAssistant
+  };
+
+  const attempts = [];
+  let lastError = "";
+  let lastDetails = null;
+
+  for (const url of endpoints) {
+    try {
+      const headers = {
+        "Content-Type": "application/json",
+        "x-gnai-assistant": config.gnaiAssistant
+      };
+
+      if (config.gnaiApiKey) {
+        headers.Authorization = `Bearer ${config.gnaiApiKey}`;
+      }
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: options.signal
+      });
+
+      attempts.push({ endpoint: url, status: response.status, ok: response.ok });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        lastError = `API error ${response.status} at ${url}: ${text || "Unknown bridge error"}`;
+        lastDetails = {
+          endpoint: url,
+          status: response.status,
+          rawBody: text
+        };
+        continue;
+      }
+
+      const body = response.body;
+      if (!body) {
+        throw new Error("Bridge stream body is empty");
+      }
+
+      const reader = body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let pending = "";
+      let finalContent = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        pending += decoder.decode(value, { stream: true });
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+
+          let event = null;
+          try {
+            event = JSON.parse(trimmed);
+          } catch (_) {
+            continue;
+          }
+
+          if (event?.type === "chunk" && typeof event.delta === "string") {
+            options.onChunk?.(event.delta);
+          } else if (event?.type === "done") {
+            finalContent = String(event.content || finalContent || "");
+            return {
+              content: finalContent,
+              endpoint: url,
+              status: response.status,
+              attempts
+            };
+          } else if (event?.type === "error") {
+            const error = new Error(event.error || "Bridge stream failed");
+            error.attempts = attempts;
+            error.details = event;
+            throw error;
+          }
+        }
+      }
+
+      if (pending.trim()) {
+        try {
+          const event = JSON.parse(pending.trim());
+          if (event?.type === "done") {
+            finalContent = String(event.content || "");
+          }
+        } catch (_) {
+          // ignore trailing incomplete json line
+        }
+      }
+
+      if (!finalContent) {
+        throw new Error("GNAI 串流回傳內容為空");
+      }
+
+      return {
+        content: finalContent,
+        endpoint: url,
+        status: response.status,
+        attempts
+      };
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        const abortError = new Error("使用者已取消請求");
+        abortError.isCancelled = true;
+        abortError.attempts = attempts;
+        abortError.details = {
+          endpoint: url,
+          cancelled: true
+        };
+        throw abortError;
+      }
+
+      if (err?.details) {
+        lastDetails = err.details;
+      }
+
+      lastError = `${url}: ${err.message || String(err)}`;
+      attempts.push({ endpoint: url, error: err.message || String(err), ok: false });
+    }
+  }
+
+  const error = new Error(lastError || "呼叫 GNAI 串流失敗");
+  error.attempts = attempts;
+  error.details = lastDetails;
+  throw error;
 }
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "chat-stream") return;
+
+  const disconnect = () => {
+    if (activeStreamPort === port && activeStreamController) {
+      activeStreamController.abort();
+    }
+    if (activeStreamPort === port) {
+      activeStreamPort = null;
+      activeStreamController = null;
+    }
+  };
+
+  port.onDisconnect.addListener(disconnect);
+
+  port.onMessage.addListener((message) => {
+    if (message?.type === "CANCEL_CHAT_STREAM") {
+      if (activeStreamPort === port && activeStreamController) {
+        activeStreamController.abort();
+      }
+      return;
+    }
+
+    if (message?.type !== "CHAT_STREAM") return;
+
+    (async () => {
+      try {
+        if (activeStreamController) {
+          port.postMessage({
+            type: "error",
+            error: "上一個請求仍在進行中，請稍候或先中止。",
+            busy: true
+          });
+          return;
+        }
+
+        activeStreamPort = port;
+        activeStreamController = new AbortController();
+        const config = await getConfig();
+
+        port.postMessage({ type: "start" });
+        const detailed = await callGnaiStream(message.messages || [], "en", config, {
+          signal: activeStreamController.signal,
+          onChunk: (delta) => {
+            port.postMessage({ type: "chunk", delta });
+          }
+        });
+
+        port.postMessage({
+          type: "done",
+          result: detailed.content,
+          debug: {
+            endpoint: detailed.endpoint,
+            status: detailed.status,
+            attempts: detailed.attempts
+          }
+        });
+      } catch (err) {
+        port.postMessage({
+          type: "error",
+          error: err.message || String(err),
+          attempts: err.attempts || [],
+          details: err.details || null,
+          cancelled: Boolean(err.isCancelled)
+        });
+      } finally {
+        if (activeStreamPort === port) {
+          activeStreamPort = null;
+          activeStreamController = null;
+        }
+      }
+    })();
+  });
+});
 
 async function debugBridgeConnection(config) {
   const healthChecks = [];
@@ -181,7 +436,7 @@ async function debugBridgeConnection(config) {
   }
 
   const pingMessages = [{ role: "user", content: "ping" }];
-  const pingResult = await callGnaiDetailed(pingMessages, normalizeLanguage(config.language || "zh-TW"), config);
+  const pingResult = await callGnaiDetailed(pingMessages, "en", config);
 
   return {
     bridgeBaseUrl: config.gnaiBaseUrl,
@@ -238,9 +493,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "CHAT") {
     (async () => {
       try {
+        if (activeChatController) {
+          sendResponse({ ok: false, error: "上一個請求仍在進行中，請稍候或先中止。", busy: true });
+          return;
+        }
+
+        activeChatController = new AbortController();
         const config = await getConfig();
-        const effectiveLanguage = normalizeLanguage(message.language || preparedLanguage || config.language || "zh-TW");
-        const detailed = await callGnaiDetailed(message.messages || [], effectiveLanguage, config);
+        const detailed = await callGnaiDetailed(message.messages || [], "en", config, {
+          signal: activeChatController.signal
+        });
         sendResponse({
           ok: true,
           result: detailed.content,
@@ -251,23 +513,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         });
       } catch (err) {
-        sendResponse({ ok: false, error: err.message || String(err), attempts: err.attempts || [] });
+        sendResponse({
+          ok: false,
+          error: err.message || String(err),
+          attempts: err.attempts || [],
+          details: err.details || null,
+          cancelled: Boolean(err.isCancelled)
+        });
+      } finally {
+        activeChatController = null;
       }
     })();
     return true;
   }
 
-  if (message.type === "PREPARE_CONNECTION") {
-    (async () => {
-      try {
-        const config = await getConfig();
-        const targetLanguage = normalizeLanguage(message.language || config.language || "zh-TW");
-        await prepareLanguagePreference(targetLanguage, config);
-        sendResponse({ ok: true, language: preparedLanguage });
-      } catch (err) {
-        sendResponse({ ok: false, error: err.message || String(err) });
-      }
-    })();
+  if (message.type === "CANCEL_CHAT") {
+    if (activeChatController) {
+      activeChatController.abort();
+      sendResponse({ ok: true, cancelled: true });
+      return true;
+    }
+
+    sendResponse({ ok: false, cancelled: false, error: "目前沒有進行中的請求" });
     return true;
   }
 

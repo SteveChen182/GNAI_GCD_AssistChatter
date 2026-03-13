@@ -1,7 +1,10 @@
 $env:GNAI_BRIDGE_HOST = "127.0.0.1"
 $env:GNAI_BRIDGE_PORT = "8775"
-$env:GNAI_BRIDGE_TIMEOUT = "240"
+$env:GNAI_BRIDGE_TIMEOUT = "90"
+$env:GNAI_BRIDGE_HEARTBEAT_SECONDS = "5"
 $env:GNAI_BRIDGE_DEFAULT_ASSISTANT = "sighting_assistant"
+$env:GNAI_BRIDGE_DEBUG = "1"
+$env:GNAI_BRIDGE_MAX_FOLLOWUP_ROUNDS = "0"
 # Optional:
 # $env:GNAI_BRIDGE_API_KEY = "your-local-bridge-token"
 

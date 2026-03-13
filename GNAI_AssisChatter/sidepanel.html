@@ -142,6 +142,18 @@
       cursor: pointer;
     }
     #sendBtn:disabled { opacity: 0.6; cursor: not-allowed; }
+    #stopBtn {
+      background: #ef4444;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 10px 14px;
+      cursor: pointer;
+      display: none;
+    }
+    #stopBtn.show { display: inline-block; }
 
     .font-size-col { display: flex; flex-direction: column; gap: 3px; }
     .font-size-btn {
@@ -161,12 +173,8 @@
     <div class="header-controls">
       <button id="loadPageBtn" class="btn feature-hidden">載入網頁</button>
       <button id="loadClipboardBtn" class="btn feature-hidden">載入剪貼簿</button>
-      <button id="debugBtn" class="btn">Debug 連線</button>
+      <button id="debugBtn" class="btn">連線測試</button>
       <button id="clearBtn" class="btn">清除對話</button>
-      <select id="languageSelect" class="selector" aria-label="Language">
-        <option value="zh-TW">繁中</option>
-        <option value="en">English</option>
-      </select>
     </div>
   </div>
 
@@ -191,6 +199,7 @@
     <div class="input-bar">
       <textarea id="messageInput" rows="1" placeholder="輸入您的問題..."></textarea>
       <button id="sendBtn">發送</button>
+      <button id="stopBtn">中止</button>
       <div class="font-size-col">
         <button id="fontIncBtn" class="font-size-btn" title="放大">+</button>
         <button id="fontDecBtn" class="font-size-btn" title="縮小">-</button>

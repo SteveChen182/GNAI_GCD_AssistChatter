@@ -4,7 +4,11 @@ const TRANSLATIONS = {
     loadingPage: "載入網頁中...",
     loadingClipboard: "載入剪貼簿中...",
     sending: "發送中...",
+    sendingElapsed: "發送中... 已等待 {sec} 秒",
     send: "發送",
+    stop: "中止",
+    cancelled: "已中止本次請求",
+    cancelling: "中止中...",
     cleared: "對話已清除",
     pageLoaded: "網頁已載入",
     clipboardLoaded: "剪貼簿已載入",
@@ -28,7 +32,11 @@ const TRANSLATIONS = {
     loadingPage: "Loading page...",
     loadingClipboard: "Loading clipboard...",
     sending: "Sending...",
+    sendingElapsed: "Sending... waiting {sec}s",
     send: "Send",
+    stop: "Stop",
+    cancelled: "Request cancelled",
+    cancelling: "Cancelling...",
     cleared: "Chat cleared",
     pageLoaded: "Page loaded",
     clipboardLoaded: "Clipboard loaded",
@@ -53,13 +61,25 @@ const FONT_SIZE_MIN = 12;
 const FONT_SIZE_MAX = 20;
 const FONT_STEP = 1;
 
-let currentLanguage = "zh-TW";
+let currentLanguage = "en";
 let currentFontSize = 14;
 let messages = [];
 let pageContent = null;
+let sendingTicker = null;
+let sendingStartedAt = 0;
+let isSending = false;
+let activeStreamPort = null;
 
 function t(key) {
   return TRANSLATIONS[currentLanguage]?.[key] || key;
+}
+
+function tFormat(key, vars = {}) {
+  let value = t(key);
+  for (const [name, v] of Object.entries(vars)) {
+    value = value.replace(new RegExp(`\\{${name}\\}`, "g"), String(v));
+  }
+  return value;
 }
 
 function setStatus(mode, text) {
@@ -100,14 +120,29 @@ function addMessage(role, content) {
 
   box.appendChild(el);
   box.scrollTop = box.scrollHeight;
+  return el;
 }
 
 function addSystemMessage(content) {
   addMessage("system", content);
 }
 
+function renderAssistantMessage(el, content) {
+  if (!el) return;
+  let html = String(content || "");
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/`(.+?)`/g, "<code>$1</code>");
+  html = html.replace(/\n/g, "<br>");
+  el.innerHTML = html;
+
+  const box = document.getElementById("messages");
+  box.scrollTop = box.scrollHeight;
+}
+
 function applyLanguage() {
   document.getElementById("sendBtn").textContent = t("send");
+  const stopBtn = document.getElementById("stopBtn");
+  if (stopBtn) stopBtn.textContent = t("stop");
   const debugBtn = document.getElementById("debugBtn");
   if (debugBtn) debugBtn.textContent = t("debugConn");
   document.getElementById("messageInput").placeholder = t("inputPlaceholder");
@@ -157,6 +192,27 @@ function formatDebugDetails(details) {
   return lines.join("\n");
 }
 
+function formatChatErrorDetails(details) {
+  if (!details || typeof details !== "object") return "";
+
+  const lines = [];
+  lines.push("== Bridge 執行細節 ==");
+  if (details.endpoint) lines.push(`endpoint: ${details.endpoint}`);
+  if (details.status !== undefined) lines.push(`status: ${details.status}`);
+  if (details.assistant) lines.push(`assistant: ${details.assistant}`);
+  if (details.dtSource) lines.push(`dtSource: ${details.dtSource}`);
+  if (details.durationMs !== undefined) lines.push(`durationMs: ${details.durationMs}`);
+  if (details.returnCode !== undefined && details.returnCode !== null) {
+    lines.push(`returnCode: ${details.returnCode}`);
+  }
+  if (details.hint) lines.push(`hint: ${details.hint}`);
+  if (details.stderr) lines.push(`stderr:\n${String(details.stderr).slice(0, 1500)}`);
+  if (details.stdout) lines.push(`stdout:\n${String(details.stdout).slice(0, 1500)}`);
+  if (details.rawBody) lines.push(`rawBody:\n${String(details.rawBody).slice(0, 1500)}`);
+
+  return lines.join("\n");
+}
+
 async function debugConnection() {
   try {
     setStatus("loading", t("debugRunning"));
@@ -200,6 +256,58 @@ function applyFontSize(size) {
   document.documentElement.style.setProperty("--chat-font-size", `${safe}px`);
 }
 
+function stopSendingTicker() {
+  if (sendingTicker) {
+    clearInterval(sendingTicker);
+    sendingTicker = null;
+  }
+}
+
+function startSendingState() {
+  isSending = true;
+  sendingStartedAt = Date.now();
+  const sendBtn = document.getElementById("sendBtn");
+  const stopBtn = document.getElementById("stopBtn");
+  const input = document.getElementById("messageInput");
+
+  sendBtn.disabled = true;
+  input.disabled = true;
+  stopBtn.classList.add("show");
+
+  const update = () => {
+    const sec = Math.max(0, Math.floor((Date.now() - sendingStartedAt) / 1000));
+    setStatus("loading", tFormat("sendingElapsed", { sec }));
+  };
+
+  update();
+  stopSendingTicker();
+  sendingTicker = setInterval(update, 1000);
+}
+
+function endSendingState() {
+  isSending = false;
+  stopSendingTicker();
+  const sendBtn = document.getElementById("sendBtn");
+  const stopBtn = document.getElementById("stopBtn");
+  const input = document.getElementById("messageInput");
+
+  sendBtn.disabled = false;
+  input.disabled = false;
+  stopBtn.classList.remove("show");
+}
+
+async function cancelSending() {
+  if (!isSending) return;
+  setStatus("loading", t("cancelling"));
+  if (activeStreamPort) {
+    activeStreamPort.postMessage({ type: "CANCEL_CHAT_STREAM" });
+    return;
+  }
+  await new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "CANCEL_CHAT" }, () => resolve());
+  });
+}
+
 async function getCurrentTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
@@ -213,22 +321,6 @@ function showPageInfo(title, url) {
 
 function hidePageInfo() {
   document.getElementById("pageInfo").classList.remove("show");
-}
-
-async function prepareConnectionLanguage() {
-  try {
-    await new Promise((resolve) => {
-      chrome.runtime.sendMessage(
-        {
-          type: "PREPARE_CONNECTION",
-          language: currentLanguage
-        },
-        () => resolve()
-      );
-    });
-  } catch (_) {
-    // Warmup is best-effort; chat flow can still continue even if it fails.
-  }
 }
 
 async function loadPage() {
@@ -287,11 +379,8 @@ function buildApiMessages(userQuestion) {
     return [...messages, { role: "user", content: userQuestion }];
   }
 
-  const isZh = currentLanguage === "zh-TW";
-  const context = isZh
-    ? `頁面標題: ${pageContent.title}\n頁面網址: ${pageContent.url}\n\n頁面內容:\n${pageContent.text}`
-    : `Page Title: ${pageContent.title}\nPage URL: ${pageContent.url}\n\nPage Content:\n${pageContent.text}`;
-  const questionPrefix = isZh ? "使用者問題" : "User Question";
+  const context = `Page Title: ${pageContent.title}\nPage URL: ${pageContent.url}\n\nPage Content:\n${pageContent.text}`;
+  const questionPrefix = "User Question";
 
   if (messages.length === 0) {
     return [{ role: "user", content: `${context}\n\n${questionPrefix}: ${userQuestion}` }];
@@ -302,7 +391,6 @@ function buildApiMessages(userQuestion) {
 
 async function sendMessage() {
   const input = document.getElementById("messageInput");
-  const sendBtn = document.getElementById("sendBtn");
   const question = input.value.trim();
 
   if (!question) {
@@ -311,39 +399,101 @@ async function sendMessage() {
   }
 
   try {
-    setStatus("loading", t("sending"));
-    sendBtn.disabled = true;
-    input.disabled = true;
+    startSendingState();
 
     addMessage("user", question);
     input.value = "";
     input.style.height = "auto";
 
     const apiMessages = buildApiMessages(question);
-    const response = await new Promise((resolve) => {
-      chrome.runtime.sendMessage(
-        {
-          type: "CHAT",
-          messages: apiMessages,
-          language: currentLanguage
-        },
-        resolve
-      );
+    const assistantEl = addMessage("assistant", "");
+    const response = await new Promise((resolve, reject) => {
+      const port = chrome.runtime.connect({ name: "chat-stream" });
+      activeStreamPort = port;
+      let received = "";
+      let settled = false;
+
+      port.onMessage.addListener((event) => {
+        if (event?.type === "chunk") {
+          received += String(event.delta || "");
+          renderAssistantMessage(assistantEl, received);
+          return;
+        }
+
+        if (event?.type === "done") {
+          const finalText = String(event.result || received || "");
+          renderAssistantMessage(assistantEl, finalText);
+          settled = true;
+          resolve({ ok: true, result: finalText, debug: event.debug || null });
+          port.disconnect();
+          return;
+        }
+
+        if (event?.type === "error") {
+          settled = true;
+          reject({
+            ok: false,
+            error: event.error || "Unknown error",
+            attempts: event.attempts || [],
+            details: event.details || null,
+            cancelled: Boolean(event.cancelled)
+          });
+          port.disconnect();
+        }
+      });
+
+      port.onDisconnect.addListener(() => {
+        if (!settled) {
+          reject({ ok: false, error: "Stream disconnected unexpectedly" });
+        }
+        activeStreamPort = null;
+      });
+
+      port.postMessage({
+        type: "CHAT_STREAM",
+        messages: apiMessages,
+        language: "en"
+      });
     });
 
     if (!response?.ok) {
+      if (response?.details) {
+        const detailText = formatChatErrorDetails(response.details);
+        if (detailText) addSystemMessage(detailText);
+      }
+      if (response?.cancelled) {
+        addSystemMessage(t("cancelled"));
+        setStatus("ready", t("ready"));
+        return;
+      }
       throw new Error(response?.error || "Unknown error");
     }
 
-    addMessage("assistant", response.result);
     messages.push({ role: "user", content: question });
     messages.push({ role: "assistant", content: response.result });
     setStatus("ready", t("ready"));
   } catch (err) {
-    setStatus("error", `${t("sendFailed")}: ${err.message || String(err)}`);
+    if (err?.details) {
+      const detailText = formatChatErrorDetails(err.details);
+      if (detailText) addSystemMessage(detailText);
+    }
+    if (err?.cancelled) {
+      addSystemMessage(t("cancelled"));
+      setStatus("ready", t("ready"));
+      return;
+    }
+    if (activeStreamPort) {
+      try {
+        activeStreamPort.disconnect();
+      } catch (_) {
+        // ignore
+      }
+      activeStreamPort = null;
+    }
+    const msg = err?.error || err?.message || String(err);
+    setStatus("error", `${t("sendFailed")}: ${msg}`);
   } finally {
-    sendBtn.disabled = false;
-    input.disabled = false;
+    endSendingState();
     input.focus();
   }
 }
@@ -358,21 +508,19 @@ function clearChat() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const languageSelect = document.getElementById("languageSelect");
   const messageInput = document.getElementById("messageInput");
 
-  const stored = await chrome.storage.local.get({ language: "zh-TW", chatFontSize: 14 });
-  currentLanguage = ["zh-TW", "en"].includes(stored.language) ? stored.language : "zh-TW";
-  languageSelect.value = currentLanguage;
+  const stored = await chrome.storage.local.get({ chatFontSize: 14 });
+  currentLanguage = "en";
   applyLanguage();
   applyFontSize(stored.chatFontSize);
-  await prepareConnectionLanguage();
 
   document.getElementById("loadPageBtn").addEventListener("click", loadPage);
   document.getElementById("loadClipboardBtn").addEventListener("click", loadClipboard);
   document.getElementById("debugBtn").addEventListener("click", debugConnection);
   document.getElementById("clearBtn").addEventListener("click", clearChat);
   document.getElementById("sendBtn").addEventListener("click", sendMessage);
+  document.getElementById("stopBtn").addEventListener("click", cancelSending);
 
   document.getElementById("fontIncBtn").addEventListener("click", async () => {
     applyFontSize(currentFontSize + FONT_STEP);
@@ -382,14 +530,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("fontDecBtn").addEventListener("click", async () => {
     applyFontSize(currentFontSize - FONT_STEP);
     await chrome.storage.local.set({ chatFontSize: currentFontSize });
-  });
-
-  languageSelect.addEventListener("change", async () => {
-    currentLanguage = languageSelect.value;
-    await chrome.storage.local.set({ language: currentLanguage });
-    await prepareConnectionLanguage();
-    applyLanguage();
-    setStatus("ready", t("ready"));
   });
 
   messageInput.addEventListener("keydown", (e) => {
