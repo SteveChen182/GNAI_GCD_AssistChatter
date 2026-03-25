@@ -9,6 +9,7 @@
 2. 在 Side Panel 問答
 3. 透過本機 bridge (`http://127.0.0.1:8775/v1`) 呼叫 `dt gnai --assistant`
 4. Side Panel 內建 `Debug 連線` 按鈕，可輸出詳細除錯訊息
+5. 開啟 extension 時會自動檢查 bridge 連線，並可透過 Native Messaging 自動啟動 bridge
 
 ## 檔案結構
 
@@ -18,6 +19,8 @@
 - `sidepanel.js`: 聊天互動與狀態管理
 - `bridge/bridge_server.py`: 本機 bridge 服務
 - `bridge/run_bridge.ps1`: bridge 啟動腳本
+- `bridge/native_host_launcher.py`: Native Messaging host，供 extension 啟動 bridge
+- `bridge/install_native_host.ps1`: 安裝 Native Messaging host 的 PowerShell 腳本
 
 ## 如何使用
 
@@ -29,9 +32,26 @@
 
 ## 注意
 
-1. 本 Extension 走固定 bridge URL：`http://127.0.0.1:8765/v1`。
+1. 本 Extension 走固定 bridge URL：`http://127.0.0.1:8775/v1`。
 2. 瀏覽器 Extension 無法直接在本機執行 `dt gnai` CLI 指令，所以一定透過 bridge。
-3. 若 bridge 未啟動，請先到 side panel 按 `Debug 連線` 檢查健康狀態與錯誤細節。
+3. 若尚未安裝 Native Messaging host，extension 無法自動啟 bridge；可先手動執行 `bridge/run_bridge.ps1`。
+4. 若 bridge 未啟動，請先到 side panel 按 `Debug 連線` 檢查健康狀態與錯誤細節。
+
+## 啟用自動啟 bridge（Native Messaging）
+
+1. 先載入 extension，於 `chrome://extensions` 複製此 extension ID。
+2. 到 `bridge` 目錄執行：
+
+```powershell
+cd .\bridge
+.\install_native_host.ps1 -ExtensionId <你的extension_id> -Browser chrome
+```
+
+3. 重新啟動瀏覽器並重新載入 extension。
+4. 開啟 Side Panel 時，extension 會自動嘗試：
+	- 先檢查 `health`
+	- 若未連線，透過 Native Host 啟動 `run_bridge.ps1`
+	- 再輪詢確認 bridge 已連線
 
 ## 使用本機 Bridge（已提供）
 

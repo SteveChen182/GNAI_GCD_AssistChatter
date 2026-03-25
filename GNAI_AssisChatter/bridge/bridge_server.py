@@ -18,6 +18,16 @@ DT_PATH_OVERRIDE = os.environ.get("GNAI_BRIDGE_DT_PATH", "").strip()
 MAX_FOLLOWUP_ROUNDS = int(os.environ.get("GNAI_BRIDGE_MAX_FOLLOWUP_ROUNDS", "0"))
 FOLLOWUP_BUDGET_MS = int(os.environ.get("GNAI_BRIDGE_FOLLOWUP_BUDGET_MS", "85000"))
 DEBUG_LOG = os.environ.get("GNAI_BRIDGE_DEBUG", "1").strip().lower() in {"1", "true", "yes", "on"}
+MAX_HISTORY_MESSAGES = int(os.environ.get("GNAI_BRIDGE_MAX_HISTORY_MESSAGES", "12"))
+MAX_HISTORY_CHARS = int(os.environ.get("GNAI_BRIDGE_MAX_HISTORY_CHARS", "12000"))
+ECHO_RESPONSE = os.environ.get("GNAI_BRIDGE_ECHO_RESPONSE", "1").strip().lower() in {"1", "true", "yes", "on"}
+STREAM_HEARTBEAT_SECONDS = max(1, int(os.environ.get("GNAI_BRIDGE_STREAM_HEARTBEAT_SECONDS", "2")))
+STREAM_EMIT_INTERVAL_SECONDS = max(0.1, float(os.environ.get("GNAI_BRIDGE_STREAM_EMIT_INTERVAL_SECONDS", "0.5")))
+STREAM_READ_CHARS = max(64, int(os.environ.get("GNAI_BRIDGE_STREAM_READ_CHARS", "1024")))
+AUTO_CLOSE_PAUSE_WINDOWS = os.environ.get("GNAI_BRIDGE_AUTO_CLOSE_PAUSE_WINDOWS", "1").strip().lower() in {"1", "true", "yes", "on"}
+PAUSE_SCAN_INTERVAL_SECONDS = max(1, int(os.environ.get("GNAI_BRIDGE_PAUSE_SCAN_INTERVAL_SECONDS", "2")))
+
+_ECHO_LOCK = threading.Lock()
 
 
 def _debug(message):
@@ -25,11 +35,139 @@ def _debug(message):
         sys.stdout.write(f"[bridge-debug] {message}\n")
 
 
+def _echo_assistant_output(text, append_newline=False):
+    if not ECHO_RESPONSE:
+        return
+    if not isinstance(text, str) or text == "":
+        if append_newline:
+            with _ECHO_LOCK:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+        return
+    with _ECHO_LOCK:
+        sys.stdout.write(text)
+        if append_newline:
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
 def _short(text, limit=280):
     value = (text or "").replace("\r", " ").replace("\n", " ").strip()
     if len(value) <= limit:
         return value
     return value[:limit] + "..."
+
+
+def _collect_descendant_processes_windows(root_pid):
+    if os.name != "nt":
+        return []
+
+    script = (
+        "$items = Get-CimInstance Win32_Process | "
+        "Select-Object ProcessId,ParentProcessId,Name,CommandLine; "
+        "$items | ConvertTo-Json -Compress"
+    )
+
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=6,
+        )
+    except Exception:
+        return []
+
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return []
+
+    try:
+        data = json.loads(completed.stdout)
+    except Exception:
+        return []
+
+    rows = data if isinstance(data, list) else [data]
+    by_parent = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        parent = row.get("ParentProcessId")
+        if parent is None:
+            continue
+        by_parent.setdefault(int(parent), []).append(row)
+
+    descendants = []
+    stack = [int(root_pid)]
+    seen = set(stack)
+    while stack:
+        parent = stack.pop()
+        for child in by_parent.get(parent, []):
+            pid = int(child.get("ProcessId", 0) or 0)
+            if pid <= 0 or pid in seen:
+                continue
+            seen.add(pid)
+            descendants.append(child)
+            stack.append(pid)
+
+    return descendants
+
+
+def _maybe_close_paused_child_windows(root_pid):
+    if os.name != "nt" or not AUTO_CLOSE_PAUSE_WINDOWS:
+        return
+
+    descendants = _collect_descendant_processes_windows(root_pid)
+    targets = []
+
+    for row in descendants:
+        name = str(row.get("Name", "")).strip().lower()
+        cmdline = str(row.get("CommandLine", "")).strip().lower()
+        pid = int(row.get("ProcessId", 0) or 0)
+        if pid <= 0:
+            continue
+
+        if name not in {"cmd.exe", "powershell.exe", "pwsh.exe"}:
+            continue
+
+        looks_pause = (
+            " pause" in cmdline
+            or "&& pause" in cmdline
+            or " -noexit" in cmdline
+            or " /k " in cmdline
+        )
+        if not looks_pause:
+            continue
+
+        targets.append((pid, name, cmdline))
+
+    for pid, name, cmdline in targets:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F", "/T"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=6,
+            )
+            _debug(f"auto-closed paused child process pid={pid} name={name} cmd='{_short(cmdline, 180)}'")
+        except Exception as err:
+            _debug(f"failed to auto-close paused child pid={pid}: {err}")
+
+
+def _is_expected_disconnect_error(err):
+    if isinstance(err, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+        return True
+    if isinstance(err, OSError):
+        winerror = getattr(err, "winerror", None)
+        errno = getattr(err, "errno", None)
+        if winerror in {10053, 10054, 995}:
+            return True
+        if errno in {32, 54, 104}:
+            return True
+    return False
 
 
 def _resolve_dt_command():
@@ -58,7 +196,10 @@ def _json_response(handler, status_code, payload):
         handler.wfile.write(body)
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as err:
         # Client disconnected or local socket got aborted before response was written.
-        sys.stdout.write(f"[bridge] response write skipped: {err}\n")
+        if _is_expected_disconnect_error(err):
+            _debug(f"response write skipped (client disconnected): {err}")
+        else:
+            sys.stdout.write(f"[bridge] response write skipped: {err}\n")
 
 
 def _stream_json_line(handler, payload):
@@ -68,8 +209,22 @@ def _stream_json_line(handler, payload):
         handler.wfile.flush()
         return True
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError) as err:
-        sys.stdout.write(f"[bridge] stream write skipped: {err}\n")
+        if _is_expected_disconnect_error(err):
+            _debug(f"stream write skipped (client disconnected): {err}")
+        else:
+            sys.stdout.write(f"[bridge] stream write skipped: {err}\n")
         return False
+
+
+class BridgeHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        _, exc, _ = sys.exc_info()
+        if exc and _is_expected_disconnect_error(exc):
+            _debug(f"request aborted by client {client_address}: {exc}")
+            return
+        super().handle_error(request, client_address)
 
 
 def _extract_bearer_token(headers):
@@ -95,6 +250,105 @@ def _get_last_user_message(messages):
             if isinstance(content, str) and content.strip():
                 return content.strip()
     return ""
+
+
+def _build_prompt_from_messages(messages):
+    if not isinstance(messages, list):
+        return ""
+
+    def _normalize_text(value):
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip()
+
+    max_chars = max(1000, MAX_HISTORY_CHARS)
+
+    # Keep only user/assistant turns and cap turn count first.
+    turns = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        text = _normalize_text(item.get("content", ""))
+        if not text:
+            continue
+        turns.append((role, text))
+
+    if not turns:
+        return ""
+
+    turns = turns[-max(1, MAX_HISTORY_MESSAGES):]
+
+    # Build from newest to oldest within budget so we do not cut messages mid-way.
+    selected = []
+    used = 0
+    for role, text in reversed(turns):
+        block = f"{role.upper()}:\n{text}"
+        block_len = len(block) + 2
+        if selected and (used + block_len) > max_chars:
+            break
+        selected.append(block)
+        used += block_len
+
+    selected.reverse()
+    if not selected:
+        role, text = turns[-1]
+        selected = [f"{role.upper()}:\n{text[:max_chars]}"]
+
+    latest_user_text = ""
+    for role, text in reversed(turns):
+        if role == "user":
+            latest_user_text = text
+            break
+
+    user_hsd_ids = []
+    for role, text in turns:
+        if role != "user":
+            continue
+        for found in re.findall(r"\b(?:HSD\s*[:#-]?\s*)?(\d{8,})\b", text, flags=re.IGNORECASE):
+            if found not in user_hsd_ids:
+                user_hsd_ids.append(found)
+
+    facts = []
+    if user_hsd_ids:
+        facts.append("Known HSD IDs from user: " + ", ".join(user_hsd_ids[-3:]))
+
+    prompt = "You are continuing an existing conversation.\n"
+    prompt += "Do not ask the user to repeat details that already exist in the memory facts or transcript.\n"
+    prompt += "If HSD IDs exist below, use them directly in your answer.\n"
+
+    # For stateless dt ask, use a focused follow-up template so the model keeps the same HSD context.
+    if latest_user_text and user_hsd_ids:
+        active_hsd = user_hsd_ids[-1]
+        focused = (
+            f"Please assist with the HSD id {active_hsd}.\n"
+            "This is a follow-up question for the same HSD case.\n"
+            "This HSD ID is from user input history.\n"
+            "Do not replace it with IDs mentioned only by assistant output.\n"
+            "Do not ask for HSD ID again unless user asks to change HSD.\n\n"
+            "Follow-up request:\n"
+            f"{latest_user_text}\n\n"
+            "Answer directly for this HSD case."
+        )
+        if len(focused) <= max_chars:
+            return focused
+
+    if facts:
+        prompt += "\nMemory facts:\n"
+        for item in facts:
+            prompt += f"- {item}\n"
+
+    prompt += "\nConversation transcript (recent turns):\n\n"
+    prompt += "\n\n".join(selected)
+
+    if latest_user_text:
+        prompt += "\n\nCurrent user request:\n"
+        prompt += latest_user_text
+
+    prompt += "\n\nAnswer as ASSISTANT and continue from the context above."
+    return prompt
 
 
 def _trim_text(text, limit=2000):
@@ -168,7 +422,7 @@ def _build_dt_popen_kwargs():
     return kwargs
 
 
-def _run_dt_gnai(prompt_text, assistant_name):
+def _run_dt_gnai(prompt_text):
     dt_command, dt_source = _resolve_dt_command()
     if not dt_command:
         return {
@@ -186,15 +440,37 @@ def _run_dt_gnai(prompt_text, assistant_name):
         "gnai",
         "ask",
         prompt_text,
-        "--assistant",
-        assistant_name,
     ]
 
-    _debug(f"dt start assistant={assistant_name} dt_source={dt_source} prompt='{_short(prompt_text)}'")
+    _debug(f"dt start dt_source={dt_source} prompt='{_short(prompt_text)}'")
 
     started = time.time()
     try:
-        completed = subprocess.run(cmd, timeout=TIMEOUT_SECONDS, **_build_dt_run_kwargs())
+        proc = subprocess.Popen(cmd, **_build_dt_popen_kwargs())
+
+        stdout_text = ""
+        stderr_text = ""
+        while True:
+            elapsed = time.time() - started
+            remaining = TIMEOUT_SECONDS - elapsed
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=TIMEOUT_SECONDS, output=stdout_text, stderr=stderr_text)
+
+            slice_timeout = min(PAUSE_SCAN_INTERVAL_SECONDS, max(0.5, remaining))
+            try:
+                stdout_text, stderr_text = proc.communicate(timeout=slice_timeout)
+                break
+            except subprocess.TimeoutExpired:
+                _maybe_close_paused_child_windows(proc.pid)
+                continue
+
+        class _Completed:
+            pass
+
+        completed = _Completed()
+        completed.stdout = stdout_text
+        completed.stderr = stderr_text
+        completed.returncode = proc.returncode
     except FileNotFoundError:
         return {
             "ok": False,
@@ -203,7 +479,11 @@ def _run_dt_gnai(prompt_text, assistant_name):
             "dt_source": dt_source,
         }
     except subprocess.TimeoutExpired as err:
-        _debug(f"dt timeout after {TIMEOUT_SECONDS}s assistant={assistant_name}")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        _debug(f"dt timeout after {TIMEOUT_SECONDS}s")
         return {
             "ok": False,
             "error": f"dt gnai ask timeout after {TIMEOUT_SECONDS}s",
@@ -255,7 +535,7 @@ def _run_dt_gnai(prompt_text, assistant_name):
     }
 
 
-def _run_dt_gnai_stream(prompt_text, assistant_name, on_delta):
+def _run_dt_gnai_stream(prompt_text, on_delta):
     dt_command, dt_source = _resolve_dt_command()
     if not dt_command:
         return {
@@ -273,11 +553,9 @@ def _run_dt_gnai_stream(prompt_text, assistant_name, on_delta):
         "gnai",
         "ask",
         prompt_text,
-        "--assistant",
-        assistant_name,
     ]
 
-    _debug(f"dt stream start assistant={assistant_name} dt_source={dt_source} prompt='{_short(prompt_text)}'")
+    _debug(f"dt stream start dt_source={dt_source} prompt='{_short(prompt_text)}'")
 
     started = time.time()
     q = queue.Queue()
@@ -287,12 +565,24 @@ def _run_dt_gnai_stream(prompt_text, assistant_name, on_delta):
     def _pump_chars(name, stream):
         try:
             while True:
-                ch = stream.read(1)
-                if not ch:
+                # Read in chunks instead of per-character to reduce CPU overhead.
+                chunk = stream.read(STREAM_READ_CHARS)
+                if not chunk:
                     break
-                q.put((name, ch))
+                q.put((name, chunk))
         finally:
             q.put((f"{name}_done", None))
+
+    def _emit_pending_delta(text):
+        if not text:
+            return True
+        if on_delta(text) is False:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False
+        return True
 
     try:
         proc = subprocess.Popen(cmd, **_build_dt_popen_kwargs())
@@ -313,6 +603,7 @@ def _run_dt_gnai_stream(prompt_text, assistant_name, on_delta):
     stderr_done = False
     pending = ""
     last_emit = time.time()
+    last_pause_scan = 0.0
 
     while not (stdout_done and stderr_done):
         if (time.time() - started) > TIMEOUT_SECONDS:
@@ -321,7 +612,7 @@ def _run_dt_gnai_stream(prompt_text, assistant_name, on_delta):
             except Exception:
                 pass
             duration_ms = int((time.time() - started) * 1000)
-            _debug(f"dt stream timeout after {TIMEOUT_SECONDS}s assistant={assistant_name}")
+            _debug(f"dt stream timeout after {TIMEOUT_SECONDS}s")
             return {
                 "ok": False,
                 "error": f"dt gnai ask timeout after {TIMEOUT_SECONDS}s",
@@ -338,16 +629,36 @@ def _run_dt_gnai_stream(prompt_text, assistant_name, on_delta):
         except queue.Empty:
             kind, data = None, None
 
+        now_for_scan = time.time()
+        if (now_for_scan - last_pause_scan) >= PAUSE_SCAN_INTERVAL_SECONDS:
+            _maybe_close_paused_child_windows(proc.pid)
+            last_pause_scan = now_for_scan
+
         if kind == "stdout":
             stdout_parts.append(data)
             pending += data
             now = time.time()
-            if len(pending) >= 120 or (pending and (now - last_emit) >= 0.25):
-                if on_delta(pending) is False:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+
+            # Prefer line-level emission; otherwise flush by time budget.
+            newline_idx = pending.rfind("\n")
+            if newline_idx >= 0:
+                ready = pending[: newline_idx + 1]
+                pending = pending[newline_idx + 1 :]
+                if not _emit_pending_delta(ready):
+                    return {
+                        "ok": False,
+                        "error": "client disconnected during stream",
+                        "status": 499,
+                        "stdout": _trim_text("".join(stdout_parts)),
+                        "stderr": _trim_text("".join(stderr_parts)),
+                        "return_code": None,
+                        "duration_ms": int((time.time() - started) * 1000),
+                        "dt_source": dt_source,
+                    }
+                last_emit = now
+
+            if pending and (now - last_emit) >= STREAM_EMIT_INTERVAL_SECONDS:
+                if not _emit_pending_delta(pending):
                     return {
                         "ok": False,
                         "error": "client disconnected during stream",
@@ -368,7 +679,7 @@ def _run_dt_gnai_stream(prompt_text, assistant_name, on_delta):
             stderr_done = True
 
     if pending:
-        if on_delta(pending) is False:
+        if not _emit_pending_delta(pending):
             return {
                 "ok": False,
                 "error": "client disconnected during stream",
@@ -453,8 +764,8 @@ def _build_followup_prompt(original_prompt, previous_output):
     )
 
 
-def _run_dt_gnai_with_followup(prompt_text, assistant_name):
-    first = _run_dt_gnai(prompt_text, assistant_name)
+def _run_dt_gnai_with_followup(prompt_text):
+    first = _run_dt_gnai(prompt_text)
     if not first.get("ok"):
         return first
 
@@ -469,9 +780,9 @@ def _run_dt_gnai_with_followup(prompt_text, assistant_name):
             break
 
         rounds += 1
-        _debug(f"followup round={rounds} triggered for assistant={assistant_name}")
+        _debug(f"followup round={rounds} triggered")
         followup_prompt = _build_followup_prompt(prompt_text, content)
-        nxt = _run_dt_gnai(followup_prompt, assistant_name)
+        nxt = _run_dt_gnai(followup_prompt)
         if not nxt.get("ok"):
             nxt["followup_rounds"] = rounds
             nxt["partial_content"] = content
@@ -600,7 +911,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
             ):
                 return
 
+            heartbeat_stop = threading.Event()
+
+            def _heartbeat_loop():
+                while not heartbeat_stop.wait(STREAM_HEARTBEAT_SECONDS):
+                    if not _stream_json_line(
+                        self,
+                        {
+                            "type": "heartbeat",
+                            "ts": int(time.time()),
+                        },
+                    ):
+                        heartbeat_stop.set()
+                        break
+
+            heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+            heartbeat_thread.start()
+
             def _on_delta(delta_text):
+                _echo_assistant_output(delta_text)
                 return _stream_json_line(
                     self,
                     {
@@ -609,37 +938,45 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     },
                 )
 
-            stream_result = _run_dt_gnai_stream(prompt, assistant, _on_delta)
-            if not stream_result.get("ok"):
+            try:
+                stream_result = _run_dt_gnai_stream(prompt, _on_delta)
+                if not stream_result.get("ok"):
+                    _stream_json_line(
+                        self,
+                        {
+                            "type": "error",
+                            "error": stream_result.get("error", "Unknown bridge error"),
+                            "assistant": assistant,
+                            "dt_source": stream_result.get("dt_source"),
+                            "duration_ms": stream_result.get("duration_ms"),
+                            "return_code": stream_result.get("return_code"),
+                            "stdout": stream_result.get("stdout"),
+                            "stderr": stream_result.get("stderr"),
+                        },
+                    )
+                    return
+
+                if ECHO_RESPONSE:
+                    content_text = str(stream_result.get("content", ""))
+                    if content_text and not content_text.endswith("\n"):
+                        _echo_assistant_output("", append_newline=True)
+
                 _stream_json_line(
                     self,
                     {
-                        "type": "error",
-                        "error": stream_result.get("error", "Unknown bridge error"),
+                        "type": "done",
+                        "content": stream_result.get("content", ""),
                         "assistant": assistant,
-                        "dt_source": stream_result.get("dt_source"),
                         "duration_ms": stream_result.get("duration_ms"),
                         "return_code": stream_result.get("return_code"),
-                        "stdout": stream_result.get("stdout"),
-                        "stderr": stream_result.get("stderr"),
+                        "dt_source": stream_result.get("dt_source"),
                     },
                 )
                 return
+            finally:
+                heartbeat_stop.set()
 
-            _stream_json_line(
-                self,
-                {
-                    "type": "done",
-                    "content": stream_result.get("content", ""),
-                    "assistant": assistant,
-                    "duration_ms": stream_result.get("duration_ms"),
-                    "return_code": stream_result.get("return_code"),
-                    "dt_source": stream_result.get("dt_source"),
-                },
-            )
-            return
-
-        result = _run_dt_gnai_with_followup(prompt, assistant)
+        result = _run_dt_gnai_with_followup(prompt)
         if not result.get("ok"):
             _debug(
                 "response error "
@@ -666,6 +1003,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         content = result["content"]
+        _echo_assistant_output(content, append_newline=True)
         response_payload = {
             "id": f"gnai-{int(time.time() * 1000)}",
             "object": "chat.completion",
@@ -713,8 +1051,9 @@ def main():
     else:
         print("API key auth: disabled")
     print(f"Bridge debug log: {'enabled' if DEBUG_LOG else 'disabled'}")
+    print(f"Echo assistant output: {'enabled' if ECHO_RESPONSE else 'disabled'}")
 
-    server = ThreadingHTTPServer((HOST, PORT), BridgeHandler)
+    server = BridgeHTTPServer((HOST, PORT), BridgeHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

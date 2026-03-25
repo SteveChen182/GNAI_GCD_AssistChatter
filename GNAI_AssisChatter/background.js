@@ -17,6 +17,35 @@ const ENGLISH_SYSTEM_PROMPT = "You are a professional and helpful GNAI assistant
 let activeChatController = null;
 let activeStreamController = null;
 let activeStreamPort = null;
+const BRIDGE_NATIVE_HOST_NAME = "com.gnai.bridge_launcher";
+const BRIDGE_START_WAIT_MS = 12000;
+const BRIDGE_HEALTH_RETRY = 12;
+const BRIDGE_HEALTH_INTERVAL_MS = 500;
+const BRIDGE_AUTO_START_SHOW_WINDOW = true;
+
+const bridgeStartupState = {
+  phase: "idle",
+  ok: null,
+  trigger: "",
+  checkedAt: "",
+  error: "",
+  healthUrl: "",
+  healthStatus: null,
+  startedByNativeHost: false,
+  native: null,
+  healthChecks: []
+};
+
+let bridgeStartupPromise = null;
+
+function safePostToPort(port, payload) {
+  try {
+    port.postMessage(payload);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 async function getConfig() {
   return {
@@ -71,6 +100,188 @@ function buildStreamEndpointCandidates(baseUrl) {
   ];
 
   return [...new Set(candidates)];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function updateBridgeStartupState(patch = {}) {
+  Object.assign(bridgeStartupState, patch, {
+    checkedAt: new Date().toISOString()
+  });
+}
+
+async function probeBridgeHealth(config, options = {}) {
+  const attempts = Math.max(1, Number(options.attempts) || 1);
+  const intervalMs = Math.max(50, Number(options.intervalMs) || 500);
+  const candidates = buildHealthCandidates(config.gnaiBaseUrl);
+  const checks = [];
+
+  for (let i = 0; i < attempts; i += 1) {
+    for (const url of candidates) {
+      try {
+        const response = await fetch(url, { method: "GET" });
+        const body = await response.text().catch(() => "");
+        const item = {
+          url,
+          ok: response.ok,
+          status: response.status,
+          bodySnippet: String(body || "").slice(0, 200)
+        };
+        checks.push(item);
+        if (response.ok) {
+          return {
+            ok: true,
+            url,
+            status: response.status,
+            checks
+          };
+        }
+      } catch (err) {
+        checks.push({
+          url,
+          ok: false,
+          error: err.message || String(err)
+        });
+      }
+    }
+
+    if (i < attempts - 1) {
+      await sleep(intervalMs);
+    }
+  }
+
+  return {
+    ok: false,
+    checks,
+    error: checks.find((x) => x?.error)?.error || "Bridge health check failed"
+  };
+}
+
+async function requestNativeBridgeStart(config) {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendNativeMessage(
+        BRIDGE_NATIVE_HOST_NAME,
+        {
+          action: "start_bridge",
+          bridgeBaseUrl: config.gnaiBaseUrl,
+          waitMs: BRIDGE_START_WAIT_MS,
+          showWindow: BRIDGE_AUTO_START_SHOW_WINDOW
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            resolve({
+              ok: false,
+              error: chrome.runtime.lastError.message,
+              noNativeHost: true
+            });
+            return;
+          }
+
+          if (!response || typeof response !== "object") {
+            resolve({ ok: false, error: "Native host returned empty response" });
+            return;
+          }
+
+          resolve(response);
+        }
+      );
+    } catch (err) {
+      resolve({ ok: false, error: err.message || String(err) });
+    }
+  });
+}
+
+async function ensureBridgeReady(trigger = "unknown") {
+  if (bridgeStartupPromise) {
+    return bridgeStartupPromise;
+  }
+
+  bridgeStartupPromise = (async () => {
+    const config = await getConfig();
+    if (!config.gnaiBaseUrl) {
+      updateBridgeStartupState({
+        phase: "failed",
+        ok: false,
+        trigger,
+        error: "GNAI bridge base URL is empty",
+        startedByNativeHost: false
+      });
+      return { ...bridgeStartupState };
+    }
+
+    updateBridgeStartupState({
+      phase: "checking",
+      ok: null,
+      trigger,
+      error: "",
+      healthUrl: "",
+      healthStatus: null,
+      startedByNativeHost: false,
+      native: null,
+      healthChecks: []
+    });
+
+    const initialHealth = await probeBridgeHealth(config, { attempts: 1, intervalMs: 100 });
+    if (initialHealth.ok) {
+      updateBridgeStartupState({
+        phase: "ready",
+        ok: true,
+        healthUrl: initialHealth.url,
+        healthStatus: initialHealth.status,
+        healthChecks: initialHealth.checks
+      });
+      return { ...bridgeStartupState };
+    }
+
+    updateBridgeStartupState({
+      phase: "starting",
+      ok: null,
+      healthChecks: initialHealth.checks
+    });
+
+    const nativeResult = await requestNativeBridgeStart(config);
+
+    updateBridgeStartupState({
+      phase: "waiting_health",
+      native: nativeResult,
+      startedByNativeHost: Boolean(nativeResult?.started)
+    });
+
+    const health = await probeBridgeHealth(config, {
+      attempts: BRIDGE_HEALTH_RETRY,
+      intervalMs: BRIDGE_HEALTH_INTERVAL_MS
+    });
+
+    if (health.ok) {
+      updateBridgeStartupState({
+        phase: "ready",
+        ok: true,
+        error: "",
+        healthUrl: health.url,
+        healthStatus: health.status,
+        healthChecks: health.checks
+      });
+      return { ...bridgeStartupState };
+    }
+
+    const startupError = nativeResult?.error || health.error || "Bridge startup failed";
+    updateBridgeStartupState({
+      phase: "failed",
+      ok: false,
+      error: startupError,
+      healthChecks: health.checks
+    });
+    return { ...bridgeStartupState };
+  })();
+
+  try {
+    return await bridgeStartupPromise;
+  } finally {
+    bridgeStartupPromise = null;
+  }
 }
 
 async function callGnaiDetailed(messages, language, config, options = {}) {
@@ -272,6 +483,8 @@ async function callGnaiStream(messages, language, config, options = {}) {
 
           if (event?.type === "chunk" && typeof event.delta === "string") {
             options.onChunk?.(event.delta);
+          } else if (event?.type === "heartbeat") {
+            options.onHeartbeat?.(event);
           } else if (event?.type === "done") {
             finalContent = String(event.content || finalContent || "");
             return {
@@ -365,7 +578,7 @@ chrome.runtime.onConnect.addListener((port) => {
     (async () => {
       try {
         if (activeStreamController) {
-          port.postMessage({
+          safePostToPort(port, {
             type: "error",
             error: "上一個請求仍在進行中，請稍候或先中止。",
             busy: true
@@ -377,15 +590,26 @@ chrome.runtime.onConnect.addListener((port) => {
         activeStreamController = new AbortController();
         const config = await getConfig();
 
-        port.postMessage({ type: "start" });
+        if (!safePostToPort(port, { type: "start" })) {
+          return;
+        }
         const detailed = await callGnaiStream(message.messages || [], "en", config, {
           signal: activeStreamController.signal,
           onChunk: (delta) => {
-            port.postMessage({ type: "chunk", delta });
+            const ok = safePostToPort(port, { type: "chunk", delta });
+            if (!ok && activeStreamController) {
+              activeStreamController.abort();
+            }
+          },
+          onHeartbeat: () => {
+            const ok = safePostToPort(port, { type: "heartbeat" });
+            if (!ok && activeStreamController) {
+              activeStreamController.abort();
+            }
           }
         });
 
-        port.postMessage({
+        safePostToPort(port, {
           type: "done",
           result: detailed.content,
           debug: {
@@ -395,7 +619,7 @@ chrome.runtime.onConnect.addListener((port) => {
           }
         });
       } catch (err) {
-        port.postMessage({
+        safePostToPort(port, {
           type: "error",
           error: err.message || String(err),
           attempts: err.attempts || [],
@@ -473,7 +697,40 @@ async function getPageContent(tabId) {
   return result;
 }
 
+chrome.runtime.onInstalled.addListener(() => {
+  ensureBridgeReady("onInstalled").catch((err) => {
+    console.warn("[bridge] auto-start failed during install", err);
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureBridgeReady("onStartup").catch((err) => {
+    console.warn("[bridge] auto-start failed during startup", err);
+  });
+});
+
+ensureBridgeReady("serviceWorkerBoot").catch((err) => {
+  console.warn("[bridge] auto-start failed during worker boot", err);
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "ENSURE_BRIDGE_READY") {
+    (async () => {
+      try {
+        const status = await ensureBridgeReady("sidePanelRequest");
+        sendResponse({ ok: true, status });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === "GET_BRIDGE_STARTUP_STATUS") {
+    sendResponse({ ok: true, status: { ...bridgeStartupState } });
+    return true;
+  }
+
   if (message.type === "GET_PAGE_CONTENT") {
     (async () => {
       try {

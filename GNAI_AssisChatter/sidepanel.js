@@ -1,6 +1,9 @@
 const TRANSLATIONS = {
   "zh-TW": {
     ready: "準備就緒",
+    bridgeBooting: "Bridge 啟動與連線檢查中...",
+    bridgeReadyAuto: "Bridge 已連線",
+    bridgeAutoStartFailed: "Bridge 自動啟動失敗",
     loadingPage: "載入網頁中...",
     loadingClipboard: "載入剪貼簿中...",
     sending: "發送中...",
@@ -17,6 +20,9 @@ const TRANSLATIONS = {
     noTab: "找不到目前分頁",
     loadFailed: "載入失敗",
     sendFailed: "發送失敗",
+    streamPartialNotice: "串流連線中斷，已保留目前收到的內容。",
+    streamRetrying: "串流中斷，改用完整回覆重試中...",
+    streamRecovered: "已改用完整回覆模式完成本次請求。",
     debugConn: "Debug 連線",
     debugRunning: "ＧＮＡＩ連線檢查中...",
     debugDone: "連線測試完成",
@@ -25,10 +31,17 @@ const TRANSLATIONS = {
     debugTitle: "Bridge 除錯結果",
     titleStart: "開始對話",
     textStart: "請直接輸入問題開始對話。",
-    inputPlaceholder: "輸入您的問題..."
+    inputPlaceholder: "輸入您的問題...",
+    enterHsdPrompt: "請輸入hsd id",
+    hsdInputPlaceholder: "請輸入 11 碼 HSD ID",
+    invalidHsdId: "請輸入有效的hssd id",
+    hsdLocked: "本次 Session HSD ID: {hsdId}"
   },
   "en": {
     ready: "Ready",
+    bridgeBooting: "Starting bridge and checking connection...",
+    bridgeReadyAuto: "Bridge connected",
+    bridgeAutoStartFailed: "Bridge auto-start failed",
     loadingPage: "Loading page...",
     loadingClipboard: "Loading clipboard...",
     sending: "Sending...",
@@ -45,6 +58,9 @@ const TRANSLATIONS = {
     noTab: "Cannot find active tab",
     loadFailed: "Load failed",
     sendFailed: "Send failed",
+    streamPartialNotice: "Stream disconnected; partial response was kept.",
+    streamRetrying: "Stream disconnected; retrying with full response...",
+    streamRecovered: "Request completed via full-response fallback.",
     debugConn: "Debug Connection",
     debugRunning: "Running diagnostics...",
     debugDone: "Diagnostics complete",
@@ -53,13 +69,19 @@ const TRANSLATIONS = {
     debugTitle: "Bridge Debug Result",
     titleStart: "Start conversation",
     textStart: "Type your question to start the conversation.",
-    inputPlaceholder: "Type your question..."
+    inputPlaceholder: "Type your question...",
+    enterHsdPrompt: "Please enter hsd id",
+    hsdInputPlaceholder: "Enter 11-digit HSD ID",
+    invalidHsdId: "Please enter a valid hssd id",
+    hsdLocked: "Current session HSD ID: {hsdId}"
   }
 };
 
 const FONT_SIZE_MIN = 12;
 const FONT_SIZE_MAX = 20;
 const FONT_STEP = 1;
+const STREAM_UI_UPDATE_MIN_INTERVAL_MS = 500;
+const HSD_ID_LENGTH = 11;
 
 let currentLanguage = "en";
 let currentFontSize = 14;
@@ -69,6 +91,15 @@ let sendingTicker = null;
 let sendingStartedAt = 0;
 let isSending = false;
 let activeStreamPort = null;
+let chatGeneration = 0;
+let activeHsdId = null;
+let streamRenderState = null;
+
+function extractHsdId(text) {
+  const value = String(text || "");
+  const m = value.match(/(?:\bHSD\s*[:#-]?\s*)?(\d{8,})\b/i);
+  return m ? m[1] : null;
+}
 
 function t(key) {
   return TRANSLATIONS[currentLanguage]?.[key] || key;
@@ -139,16 +170,143 @@ function renderAssistantMessage(el, content) {
   box.scrollTop = box.scrollHeight;
 }
 
+function beginAssistantStream(el) {
+  if (!el) return;
+
+  el.textContent = "";
+  el.style.whiteSpace = "pre-wrap";
+  const now = Date.now();
+  streamRenderState = {
+    el,
+    fullText: "",
+    pending: "",
+    rafId: null,
+    timerId: null,
+    lastFlushAt: now - STREAM_UI_UPDATE_MIN_INTERVAL_MS,
+    textNode: document.createTextNode("")
+  };
+  el.appendChild(streamRenderState.textNode);
+}
+
+function scheduleAssistantFlush() {
+  const state = streamRenderState;
+  if (!state) return;
+  if (state.rafId != null || state.timerId != null) return;
+
+  const elapsed = Date.now() - state.lastFlushAt;
+  const waitMs = Math.max(0, STREAM_UI_UPDATE_MIN_INTERVAL_MS - elapsed);
+
+  if (waitMs === 0) {
+    state.rafId = requestAnimationFrame(flushAssistantStream);
+    return;
+  }
+
+  state.timerId = setTimeout(() => {
+    const latest = streamRenderState;
+    if (!latest) return;
+    latest.timerId = null;
+    latest.rafId = requestAnimationFrame(flushAssistantStream);
+  }, waitMs);
+}
+
+function flushAssistantStream() {
+  const state = streamRenderState;
+  if (!state) return;
+
+  state.rafId = null;
+  if (!state.pending) return;
+
+  const chunk = state.pending;
+  state.pending = "";
+  state.fullText += chunk;
+  state.textNode.appendData(chunk);
+  state.lastFlushAt = Date.now();
+
+  const box = document.getElementById("messages");
+  box.scrollTop = box.scrollHeight;
+}
+
+function queueAssistantDelta(delta) {
+  const state = streamRenderState;
+  if (!state) return;
+
+  state.pending += String(delta || "");
+  scheduleAssistantFlush();
+}
+
+function finishAssistantStream(finalText) {
+  const state = streamRenderState;
+  if (!state) return;
+
+  if (state.timerId != null) {
+    clearTimeout(state.timerId);
+    state.timerId = null;
+  }
+  if (state.rafId != null) {
+    cancelAnimationFrame(state.rafId);
+    state.rafId = null;
+  }
+  flushAssistantStream();
+
+  const doneText = String(finalText || state.fullText || "");
+  state.el.style.whiteSpace = "";
+  renderAssistantMessage(state.el, doneText);
+  streamRenderState = null;
+}
+
+function cancelAssistantStreamRender() {
+  const state = streamRenderState;
+  if (!state) return;
+
+  if (state.timerId != null) {
+    clearTimeout(state.timerId);
+  }
+  if (state.rafId != null) {
+    cancelAnimationFrame(state.rafId);
+  }
+  state.el.style.whiteSpace = "";
+  streamRenderState = null;
+}
+
 function applyLanguage() {
   document.getElementById("sendBtn").textContent = t("send");
   const stopBtn = document.getElementById("stopBtn");
   if (stopBtn) stopBtn.textContent = t("stop");
   const debugBtn = document.getElementById("debugBtn");
   if (debugBtn) debugBtn.textContent = t("debugConn");
-  document.getElementById("messageInput").placeholder = t("inputPlaceholder");
+  const input = document.getElementById("messageInput");
+  input.placeholder = activeHsdId ? t("inputPlaceholder") : t("hsdInputPlaceholder");
   if (document.getElementById("messages").querySelector(".empty-state")) {
     clearMessageContainer();
   }
+}
+
+function isValidHsdId(value) {
+  return /^\d{11}$/.test(String(value || "").trim());
+}
+
+function setHsdInputMode() {
+  const input = document.getElementById("messageInput");
+  if (!input) return;
+
+  if (activeHsdId) {
+    input.removeAttribute("maxlength");
+    input.removeAttribute("pattern");
+    input.inputMode = "text";
+    input.placeholder = t("inputPlaceholder");
+    return;
+  }
+
+  input.setAttribute("maxlength", String(HSD_ID_LENGTH));
+  input.setAttribute("pattern", "\\d{11}");
+  input.inputMode = "numeric";
+  input.placeholder = t("hsdInputPlaceholder");
+}
+
+function promptForHsdId() {
+  addSystemMessage(t("enterHsdPrompt"));
+  setStatus("ready", t("enterHsdPrompt"));
+  setHsdInputMode();
 }
 
 function formatDebugDetails(details) {
@@ -247,6 +405,34 @@ async function debugConnection() {
   } catch (err) {
     addSystemMessage(`== ${t("debugTitle")} ==\nerror: ${err.message || String(err)}`);
     setStatus("error", t("debugFailed"));
+  }
+}
+
+async function ensureBridgeOnPanelOpen() {
+  try {
+    setStatus("loading", t("bridgeBooting"));
+    const response = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: "ENSURE_BRIDGE_READY" }, resolve);
+    });
+
+    if (!response?.ok) {
+      const msg = response?.error || t("bridgeAutoStartFailed");
+      setStatus("error", `${t("bridgeAutoStartFailed")}: ${msg}`);
+      addSystemMessage(`Bridge auto-start failed: ${msg}`);
+      return;
+    }
+
+    const status = response.status || {};
+    if (status.ok) {
+      setStatus("ready", t("bridgeReadyAuto"));
+      return;
+    }
+
+    const err = status.error || t("bridgeAutoStartFailed");
+    setStatus("error", `${t("bridgeAutoStartFailed")}: ${err}`);
+    addSystemMessage(`Bridge auto-start failed: ${err}`);
+  } catch (err) {
+    setStatus("error", `${t("bridgeAutoStartFailed")}: ${err.message || String(err)}`);
   }
 }
 
@@ -375,26 +561,37 @@ async function loadClipboard() {
 }
 
 function buildApiMessages(userQuestion) {
-  if (!pageContent) {
-    return [...messages, { role: "user", content: userQuestion }];
-  }
+  const sessionHint = activeHsdId
+    ? [{ role: "system", content: `Active HSD ID for this session is ${activeHsdId}. Keep this HSD context for follow-up questions unless user explicitly requests to change HSD.` }]
+    : [];
 
-  const context = `Page Title: ${pageContent.title}\nPage URL: ${pageContent.url}\n\nPage Content:\n${pageContent.text}`;
-  const questionPrefix = "User Question";
-
-  if (messages.length === 0) {
-    return [{ role: "user", content: `${context}\n\n${questionPrefix}: ${userQuestion}` }];
-  }
-
-  return [...messages, { role: "user", content: `${context}\n\n${questionPrefix}: ${userQuestion}` }];
+  return [...sessionHint, ...messages, { role: "user", content: String(userQuestion || "") }];
 }
 
 async function sendMessage() {
   const input = document.getElementById("messageInput");
   const question = input.value.trim();
+  const thisGeneration = chatGeneration;
+  let apiMessages = null;
 
   if (!question) {
     setStatus("error", t("emptyQuestion"));
+    return;
+  }
+
+  if (!activeHsdId) {
+    if (!isValidHsdId(question)) {
+      setStatus("error", t("invalidHsdId"));
+      addSystemMessage(t("invalidHsdId"));
+      return;
+    }
+
+    activeHsdId = question;
+    input.value = "";
+    input.style.height = "auto";
+    setHsdInputMode();
+    addSystemMessage(tFormat("hsdLocked", { hsdId: activeHsdId }));
+    setStatus("ready", t("ready"));
     return;
   }
 
@@ -405,24 +602,39 @@ async function sendMessage() {
     input.value = "";
     input.style.height = "auto";
 
-    const apiMessages = buildApiMessages(question);
+    apiMessages = buildApiMessages(question);
     const assistantEl = addMessage("assistant", "");
-    const response = await new Promise((resolve, reject) => {
+    beginAssistantStream(assistantEl);
+    let response = await new Promise((resolve, reject) => {
       const port = chrome.runtime.connect({ name: "chat-stream" });
       activeStreamPort = port;
       let received = "";
       let settled = false;
 
       port.onMessage.addListener((event) => {
+        if (thisGeneration !== chatGeneration) {
+          settled = true;
+          try {
+            port.disconnect();
+          } catch (_) {
+            // ignore
+          }
+          return;
+        }
+
         if (event?.type === "chunk") {
           received += String(event.delta || "");
-          renderAssistantMessage(assistantEl, received);
+          queueAssistantDelta(event.delta);
+          return;
+        }
+
+        if (event?.type === "heartbeat") {
           return;
         }
 
         if (event?.type === "done") {
           const finalText = String(event.result || received || "");
-          renderAssistantMessage(assistantEl, finalText);
+          finishAssistantStream(finalText);
           settled = true;
           resolve({ ok: true, result: finalText, debug: event.debug || null });
           port.disconnect();
@@ -444,7 +656,24 @@ async function sendMessage() {
 
       port.onDisconnect.addListener(() => {
         if (!settled) {
-          reject({ ok: false, error: "Stream disconnected unexpectedly" });
+          if (received.trim()) {
+            const partialText = String(received);
+            finishAssistantStream(partialText);
+            settled = true;
+            resolve({
+              ok: true,
+              result: partialText,
+              partial: true,
+              warning: "Stream disconnected unexpectedly"
+            });
+          } else {
+            settled = true;
+            resolve({
+              ok: true,
+              needsFallback: true,
+              warning: "Stream disconnected unexpectedly"
+            });
+          }
         }
         activeStreamPort = null;
       });
@@ -456,7 +685,41 @@ async function sendMessage() {
       });
     });
 
+    if (response?.needsFallback) {
+      setStatus("loading", t("streamRetrying"));
+      const fallback = await new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+          {
+            type: "CHAT",
+            messages: apiMessages,
+            language: "en"
+          },
+          resolve
+        );
+      });
+
+      if (!fallback?.ok) {
+        throw {
+          ok: false,
+          error: fallback?.error || response.warning || "Stream disconnected unexpectedly",
+          attempts: fallback?.attempts || [],
+          details: fallback?.details || null,
+          cancelled: Boolean(fallback?.cancelled)
+        };
+      }
+
+      const fallbackText = String(fallback.result || "");
+      finishAssistantStream(fallbackText);
+      response = {
+        ok: true,
+        result: fallbackText,
+        usedFallback: true,
+        debug: fallback.debug || null
+      };
+    }
+
     if (!response?.ok) {
+      cancelAssistantStreamRender();
       if (response?.details) {
         const detailText = formatChatErrorDetails(response.details);
         if (detailText) addSystemMessage(detailText);
@@ -469,10 +732,19 @@ async function sendMessage() {
       throw new Error(response?.error || "Unknown error");
     }
 
-    messages.push({ role: "user", content: question });
-    messages.push({ role: "assistant", content: response.result });
+    if (thisGeneration === chatGeneration) {
+      messages.push({ role: "user", content: question });
+      messages.push({ role: "assistant", content: response.result });
+    }
+    if (response?.partial) {
+      addSystemMessage(t("streamPartialNotice"));
+    }
+    if (response?.usedFallback) {
+      addSystemMessage(t("streamRecovered"));
+    }
     setStatus("ready", t("ready"));
   } catch (err) {
+    cancelAssistantStreamRender();
     if (err?.details) {
       const detailText = formatChatErrorDetails(err.details);
       if (detailText) addSystemMessage(detailText);
@@ -498,13 +770,25 @@ async function sendMessage() {
   }
 }
 
-function clearChat() {
+async function clearChat() {
+  chatGeneration += 1;
+  await cancelSending();
+  cancelAssistantStreamRender();
+  if (activeStreamPort) {
+    try {
+      activeStreamPort.disconnect();
+    } catch (_) {
+      // ignore
+    }
+    activeStreamPort = null;
+  }
   messages = [];
   pageContent = null;
+  activeHsdId = null;
   hidePageInfo();
   clearMessageContainer();
   addSystemMessage(t("cleared"));
-  setStatus("ready", t("ready"));
+  promptForHsdId();
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -540,9 +824,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   messageInput.addEventListener("input", () => {
+    if (!activeHsdId) {
+      const sanitized = messageInput.value.replace(/\D/g, "").slice(0, HSD_ID_LENGTH);
+      if (sanitized !== messageInput.value) {
+        messageInput.value = sanitized;
+      }
+    }
     messageInput.style.height = "auto";
     messageInput.style.height = `${messageInput.scrollHeight}px`;
   });
 
-  setStatus("ready", t("ready"));
+  await ensureBridgeOnPanelOpen();
+  promptForHsdId();
+  messageInput.focus();
 });
