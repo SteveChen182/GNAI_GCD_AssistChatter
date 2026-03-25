@@ -358,6 +358,24 @@ def _trim_text(text, limit=2000):
     return value[:limit] + "\n... [truncated]"
 
 
+def _normalize_conversation_id(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    # Keep the ID shell-safe and bounded for CLI argument usage.
+    normalized = re.sub(r"[^A-Za-z0-9._:+-]", "-", raw)
+    return normalized[:80]
+
+
+def _build_dt_command(dt_command, prompt_text, assistant=None, conversation_id=None):
+    cmd = [dt_command, "gnai", "ask", prompt_text]
+    # Per session policy: only pass conversation id, never force assistant from bridge.
+    if conversation_id:
+        cmd.extend(["--conversation-id", str(conversation_id)])
+    return cmd
+
+
 def _build_dt_run_kwargs():
     env = os.environ.copy()
     env["CI"] = "1"
@@ -422,7 +440,7 @@ def _build_dt_popen_kwargs():
     return kwargs
 
 
-def _run_dt_gnai(prompt_text):
+def _run_dt_gnai(prompt_text, assistant=None, conversation_id=None):
     dt_command, dt_source = _resolve_dt_command()
     if not dt_command:
         return {
@@ -435,14 +453,19 @@ def _run_dt_gnai(prompt_text):
             "dt_source": dt_source,
         }
 
-    cmd = [
+    cmd = _build_dt_command(
         dt_command,
-        "gnai",
-        "ask",
         prompt_text,
-    ]
+        assistant=assistant,
+        conversation_id=conversation_id,
+    )
+    has_assistant_flag = "--assistant" in cmd
 
-    _debug(f"dt start dt_source={dt_source} prompt='{_short(prompt_text)}'")
+    _debug(
+        "dt start "
+        f"dt_source={dt_source} assistant_flag={has_assistant_flag} "
+        f"conversation_id={conversation_id or '-'} prompt='{_short(prompt_text)}'"
+    )
 
     started = time.time()
     try:
@@ -535,7 +558,7 @@ def _run_dt_gnai(prompt_text):
     }
 
 
-def _run_dt_gnai_stream(prompt_text, on_delta):
+def _run_dt_gnai_stream(prompt_text, on_delta, assistant=None, conversation_id=None):
     dt_command, dt_source = _resolve_dt_command()
     if not dt_command:
         return {
@@ -548,14 +571,19 @@ def _run_dt_gnai_stream(prompt_text, on_delta):
             "dt_source": dt_source,
         }
 
-    cmd = [
+    cmd = _build_dt_command(
         dt_command,
-        "gnai",
-        "ask",
         prompt_text,
-    ]
+        assistant=assistant,
+        conversation_id=conversation_id,
+    )
+    has_assistant_flag = "--assistant" in cmd
 
-    _debug(f"dt stream start dt_source={dt_source} prompt='{_short(prompt_text)}'")
+    _debug(
+        "dt stream start "
+        f"dt_source={dt_source} assistant_flag={has_assistant_flag} "
+        f"conversation_id={conversation_id or '-'} prompt='{_short(prompt_text)}'"
+    )
 
     started = time.time()
     q = queue.Queue()
@@ -764,8 +792,22 @@ def _build_followup_prompt(original_prompt, previous_output):
     )
 
 
-def _run_dt_gnai_with_followup(prompt_text):
-    first = _run_dt_gnai(prompt_text)
+def _is_direct_punchline_prompt(prompt_text):
+    text = str(prompt_text or "").strip().lower()
+    if not text:
+        return False
+
+    normalized = re.sub(r"\s+", " ", text)
+    return bool(
+        re.fullmatch(
+            r"please give me a punchline summary of hsd \d{8,} and skip attachment check",
+            normalized,
+        )
+    )
+
+
+def _run_dt_gnai_with_followup(prompt_text, assistant=None, conversation_id=None):
+    first = _run_dt_gnai(prompt_text, assistant=assistant, conversation_id=conversation_id)
     if not first.get("ok"):
         return first
 
@@ -782,7 +824,7 @@ def _run_dt_gnai_with_followup(prompt_text):
         rounds += 1
         _debug(f"followup round={rounds} triggered")
         followup_prompt = _build_followup_prompt(prompt_text, content)
-        nxt = _run_dt_gnai(followup_prompt)
+        nxt = _run_dt_gnai(followup_prompt, assistant=assistant, conversation_id=conversation_id)
         if not nxt.get("ok"):
             nxt["followup_rounds"] = rounds
             nxt["partial_content"] = content
@@ -875,15 +917,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
             or str(payload.get("assistant", "")).strip()
             or DEFAULT_ASSISTANT
         )
+        conversation_id = _normalize_conversation_id(
+            payload.get("conversation_id") or payload.get("conversationId")
+        )
 
         prompt = _get_last_user_message(payload.get("messages"))
         if not prompt:
             _json_response(self, 400, {"ok": False, "error": "No user message found in payload.messages"})
             return
 
+        direct_dt_mode = _is_direct_punchline_prompt(prompt)
+
         _debug(
             "request "
             f"path={self.path} assistant={assistant} model={payload.get('model', 'N/A')} "
+            f"conversation_id={conversation_id or '-'} "
+            f"direct_dt_mode={direct_dt_mode} "
             f"prompt='{_short(prompt)}'"
         )
 
@@ -939,7 +988,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
 
             try:
-                stream_result = _run_dt_gnai_stream(prompt, _on_delta)
+                stream_result = _run_dt_gnai_stream(
+                    prompt,
+                    _on_delta,
+                    assistant=None if direct_dt_mode else assistant,
+                    conversation_id=conversation_id,
+                )
                 if not stream_result.get("ok"):
                     _stream_json_line(
                         self,
@@ -950,6 +1004,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             "dt_source": stream_result.get("dt_source"),
                             "duration_ms": stream_result.get("duration_ms"),
                             "return_code": stream_result.get("return_code"),
+                            "conversation_id": conversation_id,
                             "stdout": stream_result.get("stdout"),
                             "stderr": stream_result.get("stderr"),
                         },
@@ -969,6 +1024,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         "assistant": assistant,
                         "duration_ms": stream_result.get("duration_ms"),
                         "return_code": stream_result.get("return_code"),
+                        "conversation_id": conversation_id,
                         "dt_source": stream_result.get("dt_source"),
                     },
                 )
@@ -976,7 +1032,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
             finally:
                 heartbeat_stop.set()
 
-        result = _run_dt_gnai_with_followup(prompt)
+        if direct_dt_mode:
+            result = _run_dt_gnai(
+                prompt,
+                assistant=None,
+                conversation_id=conversation_id,
+            )
+            result.setdefault("followup_rounds", 0)
+        else:
+            result = _run_dt_gnai_with_followup(
+                prompt,
+                assistant=assistant,
+                conversation_id=conversation_id,
+            )
         if not result.get("ok"):
             _debug(
                 "response error "
@@ -993,6 +1061,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "dt_source": result.get("dt_source"),
                     "duration_ms": result.get("duration_ms"),
                     "return_code": result.get("return_code"),
+                    "conversation_id": conversation_id,
                     "stdout": result.get("stdout"),
                     "stderr": result.get("stderr"),
                     "hint": result.get("hint"),
@@ -1028,6 +1097,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "assistant": assistant,
                 "duration_ms": result.get("duration_ms"),
                 "return_code": result.get("return_code"),
+                "conversation_id": conversation_id,
                 "dt_source": result.get("dt_source"),
                 "followup_rounds": result.get("followup_rounds", 0),
             },

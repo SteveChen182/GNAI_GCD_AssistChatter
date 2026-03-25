@@ -302,6 +302,10 @@ async function callGnaiDetailed(messages, language, config, options = {}) {
     assistant: config.gnaiAssistant
   };
 
+  if (options.conversationId) {
+    payload.conversation_id = String(options.conversationId);
+  }
+
   let lastError = "";
   let lastDetails = null;
   const attempts = [];
@@ -416,6 +420,10 @@ async function callGnaiStream(messages, language, config, options = {}) {
     max_tokens: Number.isFinite(config.gnaiMaxTokens) ? config.gnaiMaxTokens : 2000,
     assistant: config.gnaiAssistant
   };
+
+  if (options.conversationId) {
+    payload.conversation_id = String(options.conversationId);
+  }
 
   const attempts = [];
   let lastError = "";
@@ -595,6 +603,7 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         const detailed = await callGnaiStream(message.messages || [], "en", config, {
           signal: activeStreamController.signal,
+          conversationId: message.conversationId,
           onChunk: (delta) => {
             const ok = safePostToPort(port, { type: "chunk", delta });
             if (!ok && activeStreamController) {
@@ -758,7 +767,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         activeChatController = new AbortController();
         const config = await getConfig();
         const detailed = await callGnaiDetailed(message.messages || [], "en", config, {
-          signal: activeChatController.signal
+          signal: activeChatController.signal,
+          conversationId: message.conversationId
         });
         sendResponse({
           ok: true,

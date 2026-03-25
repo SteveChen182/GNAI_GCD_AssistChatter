@@ -82,6 +82,7 @@ const FONT_SIZE_MAX = 20;
 const FONT_STEP = 1;
 const STREAM_UI_UPDATE_MIN_INTERVAL_MS = 500;
 const HSD_ID_LENGTH = 11;
+const QUICK_PUNCHLINE_TEMPLATE = "please give me a punchline summary of HSD {ID} and skip attachment check";
 
 let currentLanguage = "en";
 let currentFontSize = 14;
@@ -93,7 +94,9 @@ let isSending = false;
 let activeStreamPort = null;
 let chatGeneration = 0;
 let activeHsdId = null;
+let activeConversationId = null;
 let streamRenderState = null;
+const STREAM_WAIT_FRAMES = ["▶", "▶▶", "▶▶▶"];
 
 function extractHsdId(text) {
   const value = String(text || "");
@@ -183,9 +186,21 @@ function beginAssistantStream(el) {
     rafId: null,
     timerId: null,
     lastFlushAt: now - STREAM_UI_UPDATE_MIN_INTERVAL_MS,
-    textNode: document.createTextNode("")
+    textNode: document.createTextNode(""),
+    indicatorNode: document.createElement("span"),
+    indicatorTimer: null,
+    indicatorIndex: 0
   };
   el.appendChild(streamRenderState.textNode);
+  streamRenderState.indicatorNode.className = "stream-wait-indicator";
+  streamRenderState.indicatorNode.textContent = STREAM_WAIT_FRAMES[0];
+  el.appendChild(streamRenderState.indicatorNode);
+  streamRenderState.indicatorTimer = setInterval(() => {
+    const state = streamRenderState;
+    if (!state || !state.indicatorNode) return;
+    state.indicatorIndex = (state.indicatorIndex + 1) % STREAM_WAIT_FRAMES.length;
+    state.indicatorNode.textContent = STREAM_WAIT_FRAMES[state.indicatorIndex];
+  }, 500);
 }
 
 function scheduleAssistantFlush() {
@@ -238,6 +253,14 @@ function finishAssistantStream(finalText) {
   const state = streamRenderState;
   if (!state) return;
 
+  if (state.indicatorTimer != null) {
+    clearInterval(state.indicatorTimer);
+    state.indicatorTimer = null;
+  }
+  if (state.indicatorNode && state.indicatorNode.parentNode) {
+    state.indicatorNode.parentNode.removeChild(state.indicatorNode);
+  }
+
   if (state.timerId != null) {
     clearTimeout(state.timerId);
     state.timerId = null;
@@ -257,6 +280,14 @@ function finishAssistantStream(finalText) {
 function cancelAssistantStreamRender() {
   const state = streamRenderState;
   if (!state) return;
+
+  if (state.indicatorTimer != null) {
+    clearInterval(state.indicatorTimer);
+    state.indicatorTimer = null;
+  }
+  if (state.indicatorNode && state.indicatorNode.parentNode) {
+    state.indicatorNode.parentNode.removeChild(state.indicatorNode);
+  }
 
   if (state.timerId != null) {
     clearTimeout(state.timerId);
@@ -307,6 +338,45 @@ function promptForHsdId() {
   addSystemMessage(t("enterHsdPrompt"));
   setStatus("ready", t("enterHsdPrompt"));
   setHsdInputMode();
+  renderQuickActions();
+}
+
+function removeEnterHsdPromptMessage() {
+  const box = document.getElementById("messages");
+  if (!box) return;
+
+  const candidates = box.querySelectorAll(".message.system");
+  for (const node of candidates) {
+    if ((node.textContent || "").trim() === t("enterHsdPrompt")) {
+      node.remove();
+      break;
+    }
+  }
+}
+
+function buildPunchlinePrompt(hsdId) {
+  return QUICK_PUNCHLINE_TEMPLATE.replace("{ID}", String(hsdId || ""));
+}
+
+function getHsdConversationId() {
+  return String(activeConversationId || "");
+}
+
+function renderQuickActions() {
+  const wrapper = document.getElementById("quickActions");
+  const button = document.getElementById("quickPunchlineBtn");
+  if (!wrapper || !button) return;
+
+  if (!activeHsdId) {
+    wrapper.classList.remove("show");
+    button.textContent = "";
+    button.disabled = true;
+    return;
+  }
+
+  button.textContent = buildPunchlinePrompt(activeHsdId);
+  button.disabled = isSending;
+  wrapper.classList.add("show");
 }
 
 function formatDebugDetails(details) {
@@ -468,6 +538,7 @@ function startSendingState() {
   update();
   stopSendingTicker();
   sendingTicker = setInterval(update, 1000);
+  renderQuickActions();
 }
 
 function endSendingState() {
@@ -480,6 +551,7 @@ function endSendingState() {
   sendBtn.disabled = false;
   input.disabled = false;
   stopBtn.classList.remove("show");
+  renderQuickActions();
 }
 
 async function cancelSending() {
@@ -587,9 +659,12 @@ async function sendMessage() {
     }
 
     activeHsdId = question;
+    activeConversationId = `${activeHsdId}-${Date.now()}`;
     input.value = "";
     input.style.height = "auto";
+    removeEnterHsdPromptMessage();
     setHsdInputMode();
+    renderQuickActions();
     addSystemMessage(tFormat("hsdLocked", { hsdId: activeHsdId }));
     setStatus("ready", t("ready"));
     return;
@@ -610,6 +685,7 @@ async function sendMessage() {
       activeStreamPort = port;
       let received = "";
       let settled = false;
+      const conversationId = getHsdConversationId();
 
       port.onMessage.addListener((event) => {
         if (thisGeneration !== chatGeneration) {
@@ -681,7 +757,8 @@ async function sendMessage() {
       port.postMessage({
         type: "CHAT_STREAM",
         messages: apiMessages,
-        language: "en"
+        language: "en",
+        conversationId
       });
     });
 
@@ -692,7 +769,8 @@ async function sendMessage() {
           {
             type: "CHAT",
             messages: apiMessages,
-            language: "en"
+            language: "en",
+            conversationId: getHsdConversationId()
           },
           resolve
         );
@@ -785,6 +863,8 @@ async function clearChat() {
   messages = [];
   pageContent = null;
   activeHsdId = null;
+  activeConversationId = null;
+  renderQuickActions();
   hidePageInfo();
   clearMessageContainer();
   addSystemMessage(t("cleared"));
@@ -805,6 +885,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("clearBtn").addEventListener("click", clearChat);
   document.getElementById("sendBtn").addEventListener("click", sendMessage);
   document.getElementById("stopBtn").addEventListener("click", cancelSending);
+  document.getElementById("quickPunchlineBtn").addEventListener("click", () => {
+    if (!activeHsdId || isSending) return;
+    const messageInput = document.getElementById("messageInput");
+    messageInput.value = buildPunchlinePrompt(activeHsdId);
+    messageInput.style.height = "auto";
+    messageInput.style.height = `${messageInput.scrollHeight}px`;
+    sendMessage();
+  });
 
   document.getElementById("fontIncBtn").addEventListener("click", async () => {
     applyFontSize(currentFontSize + FONT_STEP);
@@ -835,6 +923,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   await ensureBridgeOnPanelOpen();
+  renderQuickActions();
   promptForHsdId();
   messageInput.focus();
 });
