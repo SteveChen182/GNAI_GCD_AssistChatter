@@ -35,7 +35,12 @@ const TRANSLATIONS = {
     enterHsdPrompt: "請輸入hsd id",
     hsdInputPlaceholder: "請輸入 11 碼 HSD ID",
     invalidHsdId: "請輸入有效的hssd id",
-    hsdLocked: "本次 Session HSD ID: {hsdId}"
+    hsdLocked: "本次 Session HSD ID: {hsdId}",
+    importHsdFromWebpage: "匯入頁面HSD",
+    noValidHsdId: "無有效HSD ID",
+    importedHsdId: "已從網址匯入 HSD ID: {hsdId}",
+    hsdAlreadyLocked: "本次 Session 已鎖定 HSD ID，請先清除對話",
+    reimportHsdConfirm: "重新匯入 HSD 將清除現有資料，是否要繼續？"
   },
   "en": {
     ready: "Ready",
@@ -73,7 +78,12 @@ const TRANSLATIONS = {
     enterHsdPrompt: "Please enter hsd id",
     hsdInputPlaceholder: "Enter 11-digit HSD ID",
     invalidHsdId: "Please enter a valid hssd id",
-    hsdLocked: "Current session HSD ID: {hsdId}"
+    hsdLocked: "Current session HSD ID: {hsdId}",
+    importHsdFromWebpage: "Import HSD",
+    noValidHsdId: "No valid HSD ID",
+    importedHsdId: "Imported HSD ID from URL: {hsdId}",
+    hsdAlreadyLocked: "Session HSD ID is already locked. Please clear chat first",
+    reimportHsdConfirm: "Re-importing HSD will clear current data. Continue?"
   }
 };
 
@@ -82,7 +92,7 @@ const FONT_SIZE_MAX = 20;
 const FONT_STEP = 1;
 const STREAM_UI_UPDATE_MIN_INTERVAL_MS = 500;
 const HSD_ID_LENGTH = 11;
-const QUICK_PUNCHLINE_TEMPLATE = "please give me a punchline summary of HSD {ID} and skip attachment check";
+const QUICK_PUNCHLINE_TEMPLATE = "Please give me a punchline summary of HSD {ID} and skip attachment check";
 
 let currentLanguage = "en";
 let currentFontSize = 14;
@@ -303,13 +313,26 @@ function applyLanguage() {
   document.getElementById("sendBtn").textContent = t("send");
   const stopBtn = document.getElementById("stopBtn");
   if (stopBtn) stopBtn.textContent = t("stop");
-  const debugBtn = document.getElementById("debugBtn");
-  if (debugBtn) debugBtn.textContent = t("debugConn");
+  const debugMenuBtn = document.getElementById("debugMenuBtn");
+  if (debugMenuBtn) debugMenuBtn.textContent = t("debugConn");
+  const importHsdBtn = document.getElementById("importHsdBtn");
+  if (importHsdBtn) importHsdBtn.textContent = t("importHsdFromWebpage");
   const input = document.getElementById("messageInput");
   input.placeholder = activeHsdId ? t("inputPlaceholder") : t("hsdInputPlaceholder");
   if (document.getElementById("messages").querySelector(".empty-state")) {
     clearMessageContainer();
   }
+}
+
+function closeSettingsMenu() {
+  const menu = document.getElementById("settingsMenu");
+  if (menu) menu.classList.remove("show");
+}
+
+function toggleSettingsMenu() {
+  const menu = document.getElementById("settingsMenu");
+  if (!menu) return;
+  menu.classList.toggle("show");
 }
 
 function isValidHsdId(value) {
@@ -339,6 +362,42 @@ function promptForHsdId() {
   setStatus("ready", t("enterHsdPrompt"));
   setHsdInputMode();
   renderQuickActions();
+  renderSessionHsdLabel();
+}
+
+function renderSessionHsdLabel() {
+  const label = document.getElementById("sessionHsdLabel");
+  if (!label) return;
+  label.textContent = activeHsdId ? `HSD ${activeHsdId}` : "";
+  updateHeaderLayoutForOverlap();
+}
+
+function updateHeaderLayoutForOverlap() {
+  const header = document.getElementById("headerBar");
+  const label = document.getElementById("sessionHsdLabel");
+  const controls = document.getElementById("headerControls");
+  const title = header?.querySelector(".header-title");
+  if (!header || !label || !controls || !title) return;
+
+  if (!(label.textContent || "").trim()) {
+    header.classList.remove("stack-controls");
+    return;
+  }
+
+  // Measure with single-row layout first, then stack controls only when needed.
+  header.classList.remove("stack-controls");
+
+  const titleRect = title.getBoundingClientRect();
+  const labelRect = label.getBoundingClientRect();
+  const controlsRect = controls.getBoundingClientRect();
+  const spacing = 8;
+
+  const overlapTitle = labelRect.left < (titleRect.right + spacing);
+  const overlapControls = labelRect.right > (controlsRect.left - spacing);
+
+  if (overlapTitle || overlapControls) {
+    header.classList.add("stack-controls");
+  }
 }
 
 function removeEnterHsdPromptMessage() {
@@ -360,6 +419,116 @@ function buildPunchlinePrompt(hsdId) {
 
 function getHsdConversationId() {
   return String(activeConversationId || "");
+}
+
+function renderStatusConversationId() {
+  const el = document.getElementById("statusConversationId");
+  if (!el) return;
+
+  const cid = getHsdConversationId();
+  if (!cid) {
+    el.textContent = "";
+    el.title = "";
+    el.classList.remove("show");
+    return;
+  }
+
+  const label = `CID: ${cid}`;
+  el.textContent = label;
+  el.title = label;
+  el.classList.add("show");
+}
+
+function lockSessionHsdId(hsdId, options = {}) {
+  const id = String(hsdId || "").trim();
+  if (!isValidHsdId(id)) {
+    return false;
+  }
+
+  if (activeHsdId && activeHsdId !== id) {
+    addSystemMessage(t("hsdAlreadyLocked"));
+    setStatus("error", t("hsdAlreadyLocked"));
+    return false;
+  }
+
+  activeHsdId = id;
+  activeConversationId = `${activeHsdId}-${Date.now()}`;
+  const input = document.getElementById("messageInput");
+  if (input) {
+    input.value = "";
+    input.style.height = "auto";
+  }
+  removeEnterHsdPromptMessage();
+  setHsdInputMode();
+  renderQuickActions();
+  renderSessionHsdLabel();
+  renderStatusConversationId();
+
+  if (options.importedFromUrl) {
+    addSystemMessage(tFormat("importedHsdId", { hsdId: activeHsdId }));
+  }
+  addSystemMessage(tFormat("hsdLocked", { hsdId: activeHsdId }));
+  setStatus("ready", t("ready"));
+  return true;
+}
+
+function extractHsdIdFromHsdesUrl(url) {
+  const value = String(url || "").trim();
+  const patterns = [
+    /^https:\/\/hsdes\.intel\.com\/appstore\/article-one\/#\/article\/(\d{11})(?:[/?#].*)?$/i,
+    /^https:\/\/hsdes\.intel\.com\/appstore\/article-one\/#\/(\d{11})(?:[/?#].*)?$/i
+  ];
+
+  for (const pattern of patterns) {
+    const m = value.match(pattern);
+    if (m) return m[1];
+  }
+
+  return "";
+}
+
+async function importHsdIdFromWebpage() {
+  try {
+    if (activeHsdId) {
+      const shouldContinue = window.confirm(t("reimportHsdConfirm"));
+      if (!shouldContinue) return;
+
+      chatGeneration += 1;
+      await cancelSending();
+      cancelAssistantStreamRender();
+      if (activeStreamPort) {
+        try {
+          activeStreamPort.disconnect();
+        } catch (_) {
+          // ignore
+        }
+        activeStreamPort = null;
+      }
+
+      messages = [];
+      pageContent = null;
+      activeHsdId = null;
+      activeConversationId = null;
+      renderQuickActions();
+      renderSessionHsdLabel();
+      hidePageInfo();
+      clearMessageContainer();
+    }
+
+    const tab = await getCurrentTab();
+    const url = String(tab?.url || "");
+    const hsdId = extractHsdIdFromHsdesUrl(url);
+    if (!hsdId) {
+      addSystemMessage(t("noValidHsdId"));
+      setStatus("error", t("noValidHsdId"));
+      return;
+    }
+
+    lockSessionHsdId(hsdId, { importedFromUrl: true });
+  } catch (_) {
+    addSystemMessage(t("noValidHsdId"));
+    setStatus("error", t("noValidHsdId"));
+  }
 }
 
 function renderQuickActions() {
@@ -658,15 +827,7 @@ async function sendMessage() {
       return;
     }
 
-    activeHsdId = question;
-    activeConversationId = `${activeHsdId}-${Date.now()}`;
-    input.value = "";
-    input.style.height = "auto";
-    removeEnterHsdPromptMessage();
-    setHsdInputMode();
-    renderQuickActions();
-    addSystemMessage(tFormat("hsdLocked", { hsdId: activeHsdId }));
-    setStatus("ready", t("ready"));
+    lockSessionHsdId(question);
     return;
   }
 
@@ -865,6 +1026,8 @@ async function clearChat() {
   activeHsdId = null;
   activeConversationId = null;
   renderQuickActions();
+  renderSessionHsdLabel();
+  renderStatusConversationId();
   hidePageInfo();
   clearMessageContainer();
   addSystemMessage(t("cleared"));
@@ -881,7 +1044,18 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   document.getElementById("loadPageBtn").addEventListener("click", loadPage);
   document.getElementById("loadClipboardBtn").addEventListener("click", loadClipboard);
-  document.getElementById("debugBtn").addEventListener("click", debugConnection);
+  document.getElementById("settingsBtn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleSettingsMenu();
+  });
+  document.getElementById("importHsdBtn").addEventListener("click", async () => {
+    closeSettingsMenu();
+    await importHsdIdFromWebpage();
+  });
+  document.getElementById("debugMenuBtn").addEventListener("click", async () => {
+    closeSettingsMenu();
+    await debugConnection();
+  });
   document.getElementById("clearBtn").addEventListener("click", clearChat);
   document.getElementById("sendBtn").addEventListener("click", sendMessage);
   document.getElementById("stopBtn").addEventListener("click", cancelSending);
@@ -924,6 +1098,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await ensureBridgeOnPanelOpen();
   renderQuickActions();
+  renderSessionHsdLabel();
+  renderStatusConversationId();
   promptForHsdId();
+  window.addEventListener("resize", updateHeaderLayoutForOverlap);
+  document.addEventListener("click", (event) => {
+    const wrap = document.querySelector(".settings-wrap");
+    if (!wrap) return;
+    if (!wrap.contains(event.target)) {
+      closeSettingsMenu();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeSettingsMenu();
+  });
   messageInput.focus();
 });
