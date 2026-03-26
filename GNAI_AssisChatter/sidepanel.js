@@ -1035,48 +1035,68 @@ async function clearChat() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-  const messageInput = document.getElementById("messageInput");
-
-  const stored = await chrome.storage.local.get({ chatFontSize: 14 });
-  currentLanguage = "en";
-  applyLanguage();
-  applyFontSize(stored.chatFontSize);
-
-  document.getElementById("loadPageBtn").addEventListener("click", loadPage);
-  document.getElementById("loadClipboardBtn").addEventListener("click", loadClipboard);
-  document.getElementById("settingsBtn").addEventListener("click", (e) => {
-    e.stopPropagation();
-    toggleSettingsMenu();
-  });
-  document.getElementById("importHsdBtn").addEventListener("click", async () => {
-    closeSettingsMenu();
-    await importHsdIdFromWebpage();
-  });
-  document.getElementById("debugMenuBtn").addEventListener("click", async () => {
-    closeSettingsMenu();
-    await debugConnection();
-  });
-  document.getElementById("clearBtn").addEventListener("click", clearChat);
-  document.getElementById("sendBtn").addEventListener("click", sendMessage);
-  document.getElementById("stopBtn").addEventListener("click", cancelSending);
-  document.getElementById("quickPunchlineBtn").addEventListener("click", () => {
-    if (!activeHsdId || isSending) return;
+  try {
     const messageInput = document.getElementById("messageInput");
-    messageInput.value = buildPunchlinePrompt(activeHsdId);
-    messageInput.style.height = "auto";
-    messageInput.style.height = `${messageInput.scrollHeight}px`;
-    sendMessage();
-  });
+    if (!messageInput) return;
 
-  document.getElementById("fontIncBtn").addEventListener("click", async () => {
-    applyFontSize(currentFontSize + FONT_STEP);
-    await chrome.storage.local.set({ chatFontSize: currentFontSize });
-  });
+    let stored = { chatFontSize: 14 };
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        stored = await chrome.storage.local.get({ chatFontSize: 14 });
+      }
+    } catch (_) {
+      // Fallback to defaults when storage API is temporarily unavailable.
+    }
 
-  document.getElementById("fontDecBtn").addEventListener("click", async () => {
-    applyFontSize(currentFontSize - FONT_STEP);
-    await chrome.storage.local.set({ chatFontSize: currentFontSize });
-  });
+    currentLanguage = "en";
+    applyLanguage();
+    applyFontSize(stored.chatFontSize);
+
+    const bindClick = (id, handler) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("click", handler);
+    };
+
+    bindClick("loadPageBtn", loadPage);
+    bindClick("loadClipboardBtn", loadClipboard);
+    bindClick("settingsBtn", (e) => {
+      e.stopPropagation();
+      toggleSettingsMenu();
+    });
+    bindClick("importHsdBtn", async () => {
+      closeSettingsMenu();
+      await importHsdIdFromWebpage();
+    });
+    bindClick("debugMenuBtn", async () => {
+      closeSettingsMenu();
+      await debugConnection();
+    });
+    bindClick("clearBtn", clearChat);
+    bindClick("sendBtn", sendMessage);
+    bindClick("stopBtn", cancelSending);
+    bindClick("quickPunchlineBtn", () => {
+      if (!activeHsdId || isSending) return;
+      const inputEl = document.getElementById("messageInput");
+      if (!inputEl) return;
+      inputEl.value = buildPunchlinePrompt(activeHsdId);
+      inputEl.style.height = "auto";
+      inputEl.style.height = `${inputEl.scrollHeight}px`;
+      sendMessage();
+    });
+
+    bindClick("fontIncBtn", async () => {
+      applyFontSize(currentFontSize + FONT_STEP);
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        await chrome.storage.local.set({ chatFontSize: currentFontSize });
+      }
+    });
+
+    bindClick("fontDecBtn", async () => {
+      applyFontSize(currentFontSize - FONT_STEP);
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        await chrome.storage.local.set({ chatFontSize: currentFontSize });
+      }
+    });
 
   messageInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1096,21 +1116,32 @@ document.addEventListener("DOMContentLoaded", async () => {
     messageInput.style.height = `${messageInput.scrollHeight}px`;
   });
 
-  await ensureBridgeOnPanelOpen();
-  renderQuickActions();
-  renderSessionHsdLabel();
-  renderStatusConversationId();
-  promptForHsdId();
-  window.addEventListener("resize", updateHeaderLayoutForOverlap);
-  document.addEventListener("click", (event) => {
-    const wrap = document.querySelector(".settings-wrap");
-    if (!wrap) return;
-    if (!wrap.contains(event.target)) {
-      closeSettingsMenu();
+    try {
+      await ensureBridgeOnPanelOpen();
+    } catch (err) {
+      const msg = err?.message || String(err);
+      setStatus("error", `${t("bridgeAutoStartFailed")}: ${msg}`);
     }
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeSettingsMenu();
-  });
-  messageInput.focus();
+
+    renderQuickActions();
+    renderSessionHsdLabel();
+    renderStatusConversationId();
+    promptForHsdId();
+    window.addEventListener("resize", updateHeaderLayoutForOverlap);
+    document.addEventListener("click", (event) => {
+      const wrap = document.querySelector(".settings-wrap");
+      if (!wrap) return;
+      if (!wrap.contains(event.target)) {
+        closeSettingsMenu();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeSettingsMenu();
+    });
+    messageInput.focus();
+  } catch (err) {
+    const msg = err?.message || String(err);
+    setStatus("error", `${t("sendFailed")}: ${msg}`);
+    console.error("sidepanel init failed", err);
+  }
 });

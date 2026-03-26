@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -288,14 +288,14 @@
     <div class="header-title">💬 GNAI AssisChatter</div>
     <div id="sessionHsdLabel" class="session-hsd-label"></div>
     <div id="headerControls" class="header-controls">
-      <button id="loadPageBtn" class="btn feature-hidden">載入網頁</button>
-      <button id="loadClipboardBtn" class="btn feature-hidden">載入剪貼簿</button>
-      <button id="importHsdBtn" class="btn">匯入HSD</button>
-      <button id="clearBtn" class="btn">清除對話</button>
+      <button id="loadPageBtn" class="btn feature-hidden">Load Page</button>
+      <button id="loadClipboardBtn" class="btn feature-hidden">Load Clipboard</button>
+      <button id="importHsdBtn" class="btn">Import HSD</button>
+      <button id="clearBtn" class="btn">Clear Chat</button>
       <div class="settings-wrap">
         <button id="settingsBtn" class="btn settings-btn" aria-label="Settings" title="Settings">⚙</button>
         <div id="settingsMenu" class="settings-menu">
-          <button id="debugMenuBtn" class="settings-item">連線測試</button>
+          <button id="debugMenuBtn" class="settings-item">Debug Connection</button>
         </div>
       </div>
     </div>
@@ -303,7 +303,7 @@
 
   <div class="status-bar">
     <span id="statusDot" class="status-dot"></span>
-    <span id="statusText">準備就緒</span>
+    <span id="statusText">Ready</span>
     <span id="statusConversationId" class="status-conversation-id"></span>
   </div>
 
@@ -319,18 +319,18 @@
 
     <div id="messages" class="messages">
       <div class="empty-state">
-        <div class="empty-title">開始對話</div>
-        <div class="empty-text">請直接輸入問題開始對話。</div>
+        <div class="empty-title">Start conversation</div>
+        <div class="empty-text">Type your question to start the conversation.</div>
       </div>
     </div>
 
     <div class="input-bar">
-      <textarea id="messageInput" rows="1" placeholder="輸入您的問題..."></textarea>
-      <button id="sendBtn">發送</button>
-      <button id="stopBtn">中止</button>
+      <textarea id="messageInput" rows="1" placeholder="Type your question..."></textarea>
+      <button id="sendBtn">Send</button>
+      <button id="stopBtn">Stop</button>
       <div class="font-size-col">
-        <button id="fontIncBtn" class="font-size-btn" title="放大">+</button>
-        <button id="fontDecBtn" class="font-size-btn" title="縮小">-</button>
+        <button id="fontIncBtn" class="font-size-btn" title="Larger">+</button>
+        <button id="fontDecBtn" class="font-size-btn" title="Smaller">-</button>
       </div>
     </div>
   </div>
