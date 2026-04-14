@@ -1,3 +1,23 @@
+# ── Sync toolkit to C:\dt_sighting (no-spaces path required by dt gnai) ──────
+$toolkitSrc = "C:\Users\steveche\OneDrive - Intel Corporation\Documents\Python_Project\GCD_SightingAssistantTool\SightingAssistantTool_latest"
+$toolkitDst = "C:\dt_sighting"
+if (Test-Path $toolkitSrc) {
+    Write-Host "[bridge] syncing toolkit $toolkitSrc -> $toolkitDst"
+    New-Item -ItemType Directory -Path $toolkitDst -Force | Out-Null
+    foreach ($item in @("toolkit.yaml", "tools", "assistants", "src")) {
+        $s = Join-Path $toolkitSrc $item
+        $d = Join-Path $toolkitDst $item
+        if (Test-Path $s) {
+            if (Test-Path $d) { Remove-Item $d -Recurse -Force }
+            Copy-Item $s $d -Recurse -Force
+        }
+    }
+    Write-Host "[bridge] toolkit sync done"
+} else {
+    Write-Warning "[bridge] toolkit source not found: $toolkitSrc (skipping sync)"
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
 $env:GNAI_BRIDGE_HOST = "127.0.0.1"
 $env:GNAI_BRIDGE_PORT = "8775"
 $env:GNAI_BRIDGE_TIMEOUT = "360"

@@ -7,6 +7,8 @@ A log file analyzer for .txt, .log, and .trace files.
 Currently supports :
 1. GOP (Graphics Output Protocol) log analysis.
 2. Burnin Test log analysis.
+3. PTAT Monitor CSV log analysis.
+4. Gfx PnP (GTMetrics) CSV log analysis.
 
 Designed to be extensible for other log types in the future.
 
@@ -23,7 +25,12 @@ from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import logging
-from utils.log_utils import LogProcessor, load_all_log_txt_files_from_temp, merge_log_results_to_attachment_info
+import csv as csv_module
+import math
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from utils.log_utils import LogProcessor, load_all_log_txt_trace_files_from_temp, merge_log_results_to_attachment_info, build_hsd_prefixed_output_name
 
 
 logging.basicConfig(level=logging.CRITICAL)
@@ -1269,7 +1276,7 @@ class GOPLogProcessor(LogProcessor):
 
 def process_gop_files():
     """Process gop files using data from check_attachments.py"""
-    all_log_txt_files = load_all_log_txt_files_from_temp()
+    all_log_txt_files = load_all_log_txt_trace_files_from_temp()
     
     if not all_log_txt_files:
         return {}, []
@@ -1742,23 +1749,625 @@ class BurninLogProcessor(LogProcessor):
 
 def process_burnin_files():
     """Process burnin files using data from check_attachments.py"""
-    all_log_txt_files = load_all_log_txt_files_from_temp()
-    
-    if not all_log_txt_files:
-        return {}, []
-    
-    burnin_processor = BurninLogProcessor()
-    return burnin_processor.coordinate_batch_processing(all_log_txt_files)
+    all_log_txt_trace_files = load_all_log_txt_trace_files_from_temp()
 
+    if not all_log_txt_trace_files:
+        return {}, []
+
+    burnin_processor = BurninLogProcessor()
+    return burnin_processor.coordinate_batch_processing(all_log_txt_trace_files)
+
+
+# ========================================================================================
+#   PTAT Monitor CSV Log Processor
+# ========================================================================================
+
+class PTATLogProcessor(LogProcessor):
+    """PTAT Monitor CSV log processor for GFX frequency and GT throttle analysis."""
+
+    # Required headers are the minimum columns needed to identify and process a PTAT log.
+    REQUIRED_HEADERS = [
+        'Relative Time(mS)',
+        'Gfx Component-Current Slice-Gfx Frequency(MHz)',
+        'Turbo Parameters-Gt Clip Reason',
+    ]
+
+    # Required plot columns are the specific columns we want to visualize in the generated plot.
+
+    # TO-DO: In the future, we will consider making some of these optional if giving the user a choice in interactive mode. 
+    REQUIRED_PLOT_COLUMNS = [
+        ('Gfx Component-Current Slice-Gfx Frequency(MHz)', '#00d2ff'),  # primary freq subplot
+        ('Turbo Parameters-Gt Clip Reason',                '#ff4757'),  # GT clip binary fill subplot
+        ('CPU-Info-P-Core Average Frequency(MHz)',         'purple'),
+        ('CPU-Info-E-Core Average Frequency(MHz)',         'mediumpurple'),
+        ('Power-IA Power(Watts)',                          'firebrick'),
+        ('Power-GT Power(Watts)',                          'darkorange'),
+        ('Power-Rest of Package Power(Watts)',             'goldenrod'),
+        ('Power-Package Power(Watts)',                     'darkred'),
+    ]
+
+    OPTIONAL_PLOT_COLUMNS = []  # reserved for future plot series
+
+    def detect_log_type(self, file_path: str) -> Tuple[bool, str]:
+        if not file_path.lower().endswith('.csv'):
+            return False, "Not a CSV file"
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                header_line = f.readline()
+            missing = [col for col in self.REQUIRED_HEADERS if col not in header_line]
+            if missing:
+                return False, f"Missing PTAT columns: {missing}"
+            return True, "Found PTAT Log"
+        except Exception as e:
+            return False, f"Error reading file: {str(e)}"
+
+    def process_log(self, file_path: str) -> Dict:
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                reader = csv_module.reader(f)
+                headers = next(reader)
+
+                try:
+                    time_idx = headers.index('Relative Time(mS)')
+                except ValueError as e:
+                    return {'file_path': file_path, 'error': f"Column not found: {e}", 'processed': False}
+
+                # Discover all plot columns uniformly from REQUIRED_PLOT_COLUMNS
+                col_meta = []
+                for col_name, color in self.REQUIRED_PLOT_COLUMNS + self.OPTIONAL_PLOT_COLUMNS:
+                    try:
+                        col_meta.append((headers.index(col_name), col_name, color))
+                    except ValueError:
+                        logging.warning(f"Required plot column not found in CSV: {col_name}")
+
+                col_idx_map = {name: idx for idx, name, _ in col_meta}
+                freq_idx = col_idx_map.get('Gfx Component-Current Slice-Gfx Frequency(MHz)')
+                clip_idx = col_idx_map.get('Turbo Parameters-Gt Clip Reason')
+                if freq_idx is None or clip_idx is None:
+                    return {'file_path': file_path, 'error': "Required plot columns (freq/clip) missing from CSV", 'processed': False}
+
+                # freq and clip are treated separately due to their different data types to other columns :
+                #   freq → continuous numeric with avg line annotation
+                #   clip → categorical string converted to binary fill with reason labels
+                # All remaining columns are uniform numeric series fed into plot_series subplots.
+                _dedicated = {freq_idx, clip_idx}
+                series_meta = [(idx, name, color) for idx, name, color in col_meta if idx not in _dedicated]
+
+                time_data, freq_data, clip_data = [], [], []
+                col_data = [[] for _ in series_meta]
+
+                for row in reader:
+                    try:
+                        t = float(row[time_idx]) / 1000.0  # ms -> seconds
+                    except (ValueError, IndexError):
+                        continue
+                    try:
+                        freq = float(row[freq_idx])
+                    except (ValueError, IndexError):
+                        freq = float('nan')
+                    clip = row[clip_idx].strip() if clip_idx < len(row) else ''
+                    time_data.append(t)
+                    freq_data.append(freq)
+                    clip_data.append(clip)
+                    for i, (oi, _, _) in enumerate(series_meta):
+                        try:
+                            val = float(row[oi])
+                        except (ValueError, IndexError):
+                            val = float('nan')
+                        col_data[i].append(val)
+
+            if not time_data:
+                return {'file_path': file_path, 'error': "No valid time data rows found", 'processed': False}
+
+            plot_series = [
+                (col_name, color, data)
+                for (_, col_name, color), data in zip(series_meta, col_data)
+            ]
+
+            plot_path = self._generate_plot(file_path, time_data, freq_data, clip_data, plot_series)
+
+            valid_freqs = [f for f in freq_data if not math.isnan(f)]
+            clip_events = [(t, c) for t, c in zip(time_data, clip_data) if c]
+            unique_clip_reasons = sorted(set(c for _, c in clip_events))
+
+            return {
+                'file_path': file_path,
+                'log_type': 'ptat_csv',
+                'processed': True,
+                'ptat_result': {
+                    'total_samples': len(time_data),
+                    'duration_seconds': round(time_data[-1] - time_data[0], 2) if len(time_data) > 1 else 0,
+                    'gfx_freq_stats': {
+                        'min_mhz': round(min(valid_freqs), 1) if valid_freqs else None,
+                        'max_mhz': round(max(valid_freqs), 1) if valid_freqs else None,
+                        'avg_mhz': round(sum(valid_freqs) / len(valid_freqs), 1) if valid_freqs else None,
+                    },
+                    'gt_clip_events': len(clip_events),
+                    'unique_clip_reasons': unique_clip_reasons,
+                    'plot_path': plot_path,
+                }
+            }
+
+        except Exception as e:
+            return {
+                'file_path': file_path,
+                'error': f"Error processing PTAT log: {str(e)}",
+                'processed': False
+            }
+
+    def _generate_plot(self, file_path: str, time_data: List, freq_data: List, clip_data: List, plot_series: list = None) -> Optional[str]:
+        try:
+            from matplotlib.ticker import AutoMinorLocator
+            import matplotlib.patheffects as pe
+
+            src_dir = os.getcwd()
+            plots_dir = os.path.join(src_dir, '.output', 'PTAT_logs_plots')
+            os.makedirs(plots_dir, exist_ok=True)
+
+            prefixed_file_name = build_hsd_prefixed_output_name(file_path)
+            base_name, _ = os.path.splitext(prefixed_file_name)
+            plot_path = os.path.join(plots_dir, f"{base_name}_ptat_plot.png")
+
+            clip_indicator = [1 if c else 0 for c in clip_data]
+
+            # --- Theme ---
+            BG       = '#1a1a2e'
+            PANEL    = '#16213e'
+            GRID_CLR = '#2a2a4a'
+            TEXT     = '#e0e0e0'
+            ACCENT   = '#00d2ff'
+
+            n_series = len(plot_series) if plot_series else 0
+            n_plots = 2 + n_series
+            height_ratios = [3] + [2] * n_series + [1.5]
+
+            fig, axes = plt.subplots(n_plots, 1,
+                                     figsize=(16, 2.5 * n_plots + 1.5),
+                                     gridspec_kw={'height_ratios': height_ratios, 'hspace': 0.35})
+            if n_plots == 1:
+                axes = [axes]
+
+            fig.patch.set_facecolor(BG)
+            fig.suptitle(f'PTAT Analysis  ·  {prefixed_file_name}',
+                         fontsize=14, fontweight='bold', color=TEXT,
+                         y=0.98, fontfamily='monospace')
+
+            def style_ax(ax, ylabel, title):
+                ax.set_facecolor(PANEL)
+                ax.set_ylabel(ylabel, fontsize=9, color=TEXT, fontweight='semibold')
+                ax.set_xlabel('Time (seconds)', fontsize=8, color=TEXT)
+                ax.set_title(title, fontsize=9, color=ACCENT, loc='left', pad=4, fontweight='semibold')
+                ax.tick_params(colors=TEXT, labelsize=8)
+                ax.grid(True, linestyle=':', alpha=0.25, color=GRID_CLR)
+                ax.xaxis.set_minor_locator(AutoMinorLocator(2))
+                for spine in ax.spines.values():
+                    spine.set_color(GRID_CLR)
+                    spine.set_linewidth(0.5)
+
+            ax_idx = 0
+
+            # --- GFX Slice Frequency ---
+            axes[ax_idx].fill_between(time_data, freq_data, alpha=0.15, color=ACCENT)
+            axes[ax_idx].plot(time_data, freq_data, color=ACCENT, linewidth=0.9,
+                              path_effects=[pe.Stroke(linewidth=1.8, foreground=ACCENT, alpha=0.3), pe.Normal()])
+            valid_freqs = [f for f in freq_data if not math.isnan(f)]
+            if valid_freqs:
+                avg_freq = sum(valid_freqs) / len(valid_freqs)
+                axes[ax_idx].axhline(avg_freq, color='#ffb347', linewidth=0.7, linestyle='--', alpha=0.7)
+                axes[ax_idx].text(time_data[-1], avg_freq, f'  avg {avg_freq:.0f}',
+                                  fontsize=7, color='#ffb347', va='center')
+            style_ax(axes[ax_idx], 'MHz', 'GFX Slice Frequency')
+            ax_idx += 1
+
+            # --- Plot series (CPU freq, power channels) ---
+            palette = ['#e056fd', '#a29bfe', '#ff6b6b', '#ffa502', '#eccc68', '#ff4757']
+            if plot_series:
+                for i, (label, _color, data) in enumerate(plot_series):
+                    c = palette[i % len(palette)]
+                    unit = 'Watts' if 'Power' in label else 'MHz'
+                    axes[ax_idx].fill_between(time_data, data, alpha=0.10, color=c)
+                    axes[ax_idx].plot(time_data, data, color=c, linewidth=0.8)
+                    short_label = label.replace('CPU-Info-', '').replace('Power-', '').replace('(MHz)', '').replace('(Watts)', '').strip()
+                    style_ax(axes[ax_idx], unit, short_label)
+                    ax_idx += 1
+
+            # --- GT Clip Reason ---
+            axes[ax_idx].fill_between(time_data, clip_indicator, step='post', alpha=0.5,
+                                      color='#ff4757', label='GT Clipped')
+            axes[ax_idx].fill_between(time_data, clip_indicator, step='post', alpha=0.08,
+                                      color='#ff4757')
+            style_ax(axes[ax_idx], 'Clipped', 'GT Clip Reason')
+            axes[ax_idx].set_yticks([0, 1])
+            axes[ax_idx].set_yticklabels(['No', 'Yes'], fontsize=8, color=TEXT)
+            axes[ax_idx].set_ylim([-0.05, 1.7])
+
+            seen_reasons: set = set()
+            label_idx = 0
+            for t, c in zip(time_data, clip_data):
+                if c and c not in seen_reasons:
+                    y_offset = 1.12 + (label_idx % 2) * 0.18
+                    axes[ax_idx].annotate(c, xy=(t, 1.0), xytext=(t, y_offset),
+                                          fontsize=6, rotation=0, ha='center', va='bottom',
+                                          color='#ff6b6b', annotation_clip=False,
+                                          fontweight='semibold',
+                                          path_effects=[pe.withStroke(linewidth=2, foreground=PANEL)])
+                    seen_reasons.add(c)
+                    label_idx += 1
+
+            axes[ax_idx].set_xlim(left=time_data[0] if time_data else 0)
+
+            # --- Duration + samples watermark ---
+            if len(time_data) > 1:
+                duration = time_data[-1] - time_data[0]
+                fig.text(0.99, 0.005,
+                         f'{len(time_data)} samples  ·  {duration:.1f}s',
+                         fontsize=7, color=GRID_CLR, ha='right', fontfamily='monospace')
+
+            plt.savefig(plot_path, dpi=180, bbox_inches='tight',
+                        facecolor=fig.get_facecolor(), edgecolor='none')
+            plt.close(fig)
+            return plot_path
+
+        except Exception as e:
+            logging.error(f"[PTAT] Failed to generate plot for {file_path}: {e}")
+            return None
+
+    def coordinate_batch_processing(self, all_csv_files: List[Tuple]) -> Tuple[Dict, List]:
+        attachment_results = defaultdict(list)
+        ptat_analysis_results = []
+
+        if not all_csv_files:
+            logging.debug("No .csv files to process")
+            return dict(attachment_results), ptat_analysis_results
+
+        logging.debug(f"[PTAT] Processing {len(all_csv_files)} CSV files")
+
+        # Process sequentially to avoid thread-safety issues with matplotlib.pyplot
+        for file_path, attach_info in all_csv_files:
+            try:
+                result = self._process_single_file(file_path, attach_info)
+                if result:
+                    attach_name, ptat_data = result
+                    self._handle_processing_result(
+                        attach_name, ptat_data, attachment_results, ptat_analysis_results
+                    )
+            except Exception as e:
+                self._handle_processing_error(file_path, attach_info, e, attachment_results)
+
+        return dict(attachment_results), ptat_analysis_results
+
+    def _process_single_file(self, file_path: str, attach_info: Dict) -> Optional[Tuple[str, Dict]]:
+        try:
+            file_name = os.path.basename(file_path)
+            logging.debug(f"[PTAT] Analyzing file: {file_name}")
+            is_ptat, reason = self.detect_log_type(file_path)
+            logging.debug(f"[PTAT] Detection result for {file_name}: {is_ptat} - {reason}")
+            if is_ptat:
+                result = self.process_log(file_path)
+                logging.debug(f"[PTAT] Processing completed for {file_name}")
+                return attach_info.get('document.file_name', file_name), result
+            else:
+                logging.debug(f"[PTAT] {file_name} - Not a PTAT log: {reason}")
+                return None
+        except Exception as e:
+            logging.error(f"[PTAT] Error processing {file_path}: {str(e)}")
+            raise
+
+    def _handle_processing_result(self, attach_name: str, ptat_data: Dict,
+                                  attachment_results: Dict, ptat_analysis_results: List):
+        if ptat_data and 'ptat_result' in ptat_data and 'error' not in ptat_data:
+            ptat_analysis_results.append(ptat_data)
+            file_name = os.path.basename(ptat_data.get('file_path', 'Unknown'))
+            result = ptat_data['ptat_result']
+            total_samples = result.get('total_samples', 0)
+            gt_clip_events = result.get('gt_clip_events', 0)
+            attachment_results[attach_name].append(
+                f"{file_name} : PTAT CSV processed successfully "
+                f"({total_samples} samples, {gt_clip_events} clip events)"
+            )
+        elif ptat_data and 'error' in ptat_data:
+            error_msg = ptat_data.get('error', 'Unknown error')
+            file_name = os.path.basename(ptat_data.get('file_path', 'Unknown'))
+            attachment_results[attach_name].append(
+                f"{file_name} : PTAT CSV Processing Failed - {error_msg}"
+            )
+
+    def _handle_processing_error(self, file_path: str, attach_info: Dict,
+                                 error: Exception, attachment_results: Dict):
+        self._handle_common_processing_error(
+            log_prefix='PTAT',
+            file_path=file_path,
+            attach_info=attach_info,
+            error=error,
+            attachment_results=attachment_results,
+        )
+
+
+def process_ptat_files():
+    """Process PTAT Monitor CSV files found in the workspace."""
+    from utils.log_utils import load_all_csv_files_from_temp
+    all_csv_files = load_all_csv_files_from_temp()
+    if not all_csv_files:
+        return {}, []
+    ptat_processor = PTATLogProcessor()
+    att_results, analysis_results = ptat_processor.coordinate_batch_processing(all_csv_files)
+    return att_results, analysis_results
+
+
+# ========================================================================================
+#   Gfx PnP (GTMetrics) CSV Log Processor
+# ========================================================================================
+
+class GfxPnpLogProcessor(LogProcessor):
+    """GTMetrics / Gfx PnP CSV log processor."""
+
+    REQUIRED_HEADERS = [
+        'Time[Sec]',
+        'RenderFreqEffective[MHz]',
+        'IaBias',
+        'RenderBias',
+        'MediaBias',
+    ]
+
+    PLOT_COLUMNS = [
+        ('RenderFreqEffective[MHz]', 'MHz',  '#00d2ff'),
+        ('IaBias',                   'Bias', '#e056fd'),
+        ('RenderBias',               'Bias', '#ff6b6b'),
+        ('MediaBias',                'Bias', '#ffa502'),
+    ]
+
+    def detect_log_type(self, file_path: str) -> Tuple[bool, str]:
+        if not file_path.lower().endswith('.csv'):
+            return False, "Not a CSV file"
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                header_line = f.readline()
+            missing = [col for col in self.REQUIRED_HEADERS if col not in header_line]
+            if missing:
+                return False, f"Missing GTMetrics columns: {missing}"
+            return True, "Found Gfx PnP Log"
+        except Exception as e:
+            return False, f"Error reading file: {str(e)}"
+
+    def process_log(self, file_path: str) -> Dict:
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                reader = csv_module.reader(f)
+                headers = next(reader)
+
+                try:
+                    time_idx = headers.index('Time[Sec]')
+                except ValueError as e:
+                    return {'file_path': file_path, 'error': f"Column not found: {e}", 'processed': False}
+
+                col_meta = []
+                for col_name, unit, color in self.PLOT_COLUMNS:
+                    try:
+                        col_meta.append((headers.index(col_name), col_name, unit, color))
+                    except ValueError:
+                        pass
+
+                if not col_meta:
+                    return {'file_path': file_path, 'error': "No plot columns found in headers", 'processed': False}
+
+                time_data: List[float] = []
+                series_data: List[List[float]] = [[] for _ in col_meta]
+
+                for row in reader:
+                    try:
+                        t = float(row[time_idx])
+                    except (ValueError, IndexError):
+                        continue
+                    time_data.append(t)
+                    for i, (ci, _, _, _) in enumerate(col_meta):
+                        try:
+                            series_data[i].append(float(row[ci]))
+                        except (ValueError, IndexError):
+                            series_data[i].append(float('nan'))
+
+            if not time_data:
+                return {'file_path': file_path, 'error': "No valid time data rows found", 'processed': False}
+
+            plot_series = [
+                (col_name, unit, color, data)
+                for (_, col_name, unit, color), data in zip(col_meta, series_data)
+            ]
+
+            plot_path = self._generate_plot(file_path, time_data, plot_series)
+
+            # Build per-column stats
+            col_stats = {}
+            for col_name, _unit, _color, data in plot_series:
+                valid = [v for v in data if not math.isnan(v)]
+                if valid:
+                    col_stats[col_name] = {
+                        'min': round(min(valid), 2),
+                        'max': round(max(valid), 2),
+                        'avg': round(sum(valid) / len(valid), 2),
+                    }
+
+            return {
+                'file_path': file_path,
+                'log_type': 'gfxpnp_csv',
+                'processed': True,
+                'gfxpnp_result': {
+                    'total_samples': len(time_data),
+                    'duration_seconds': round(time_data[-1] - time_data[0], 2) if len(time_data) > 1 else 0,
+                    'column_stats': col_stats,
+                    'plot_path': plot_path,
+                }
+            }
+
+        except Exception as e:
+            return {
+                'file_path': file_path,
+                'error': f"Error processing Gfx PnP log: {str(e)}",
+                'processed': False
+            }
+
+    def _generate_plot(self, file_path: str, time_data: List, plot_series: list) -> Optional[str]:
+        try:
+            from matplotlib.ticker import AutoMinorLocator
+            import matplotlib.patheffects as pe
+
+            src_dir = os.getcwd()
+            plots_dir = os.path.join(src_dir, '.output', 'GfxPnp_logs_plots')
+            os.makedirs(plots_dir, exist_ok=True)
+
+            prefixed_file_name = build_hsd_prefixed_output_name(file_path)
+            base_name, _ = os.path.splitext(prefixed_file_name)
+            plot_path = os.path.join(plots_dir, f"{base_name}_gfxpnp_plot.png")
+
+            BG       = '#1a1a2e'
+            PANEL    = '#16213e'
+            GRID_CLR = '#2a2a4a'
+            TEXT     = '#e0e0e0'
+
+            n_plots = len(plot_series)
+            if n_plots == 0:
+                return None
+
+            fig, axes = plt.subplots(n_plots, 1,
+                                     figsize=(16, 2.5 * n_plots + 1.5),
+                                     gridspec_kw={'hspace': 0.4})
+            if n_plots == 1:
+                axes = [axes]
+
+            fig.patch.set_facecolor(BG)
+            fig.suptitle(f'Gfx PnP Analysis  ·  {prefixed_file_name}',
+                         fontsize=14, fontweight='bold', color=TEXT,
+                         y=0.98, fontfamily='monospace')
+
+            for idx, (col_name, unit, color, data) in enumerate(plot_series):
+                ax = axes[idx]
+                ax.set_facecolor(PANEL)
+                short_label = col_name.replace('[MHz]', '').replace('[%]', '').strip()
+                ax.set_title(short_label, fontsize=9, color=color, loc='left', pad=4, fontweight='semibold')
+                ax.set_ylabel(unit, fontsize=9, color=TEXT, fontweight='semibold')
+                ax.set_xlabel('Time (seconds)', fontsize=8, color=TEXT)
+                ax.tick_params(colors=TEXT, labelsize=8)
+                ax.grid(True, linestyle=':', alpha=0.25, color=GRID_CLR)
+                ax.xaxis.set_minor_locator(AutoMinorLocator(2))
+                for spine in ax.spines.values():
+                    spine.set_color(GRID_CLR)
+                    spine.set_linewidth(0.5)
+
+                ax.fill_between(time_data, data, alpha=0.15, color=color)
+                ax.plot(time_data, data, color=color, linewidth=0.9,
+                        path_effects=[pe.Stroke(linewidth=1.8, foreground=color, alpha=0.3), pe.Normal()])
+
+                valid = [v for v in data if not math.isnan(v)]
+                if valid:
+                    avg_val = sum(valid) / len(valid)
+                    ax.axhline(avg_val, color='#ffb347', linewidth=0.7, linestyle='--', alpha=0.7)
+                    ax.text(time_data[-1], avg_val, f'  avg {avg_val:.1f}',
+                            fontsize=7, color='#ffb347', va='center')
+
+            if len(time_data) > 1:
+                duration = time_data[-1] - time_data[0]
+                fig.text(0.99, 0.005,
+                         f'{len(time_data)} samples  ·  {duration:.1f}s',
+                         fontsize=7, color=GRID_CLR, ha='right', fontfamily='monospace')
+
+            plt.savefig(plot_path, dpi=180, bbox_inches='tight',
+                        facecolor=fig.get_facecolor(), edgecolor='none')
+            plt.close(fig)
+            return plot_path
+
+        except Exception as e:
+            logging.error(f"[GfxPnp] Failed to generate plot for {file_path}: {e}")
+            return None
+
+    def coordinate_batch_processing(self, all_csv_files: List[Tuple]) -> Tuple[Dict, List]:
+        attachment_results = defaultdict(list)
+        analysis_results = []
+
+        if not all_csv_files:
+            logging.debug("No .csv files to process for GfxPnp")
+            return dict(attachment_results), analysis_results
+
+        logging.debug(f"[GfxPnp] Processing {len(all_csv_files)} CSV files")
+
+        # Process sequentially to avoid thread-safety issues with matplotlib.pyplot
+        for file_path, attach_info in all_csv_files:
+            try:
+                result = self._process_single_file(file_path, attach_info)
+                if result:
+                    attach_name, data = result
+                    self._handle_processing_result(
+                        attach_name, data, attachment_results, analysis_results
+                    )
+            except Exception as e:
+                self._handle_processing_error(file_path, attach_info, e, attachment_results)
+
+        return dict(attachment_results), analysis_results
+
+    def _process_single_file(self, file_path: str, attach_info: Dict) -> Optional[Tuple[str, Dict]]:
+        try:
+            file_name = os.path.basename(file_path)
+            logging.debug(f"[GfxPnp] Analyzing file: {file_name}")
+            is_gfxpnp, reason = self.detect_log_type(file_path)
+            logging.debug(f"[GfxPnp] Detection result for {file_name}: {is_gfxpnp} - {reason}")
+            if is_gfxpnp:
+                result = self.process_log(file_path)
+                logging.debug(f"[GfxPnp] Processing completed for {file_name}")
+                return attach_info.get('document.file_name', file_name), result
+            else:
+                logging.debug(f"[GfxPnp] {file_name} - Not a Gfx PnP log: {reason}")
+                return None
+        except Exception as e:
+            logging.error(f"[GfxPnp] Error processing {file_path}: {str(e)}")
+            raise
+
+    def _handle_processing_result(self, attach_name: str, data: Dict,
+                                  attachment_results: Dict, analysis_results: List):
+        if data and 'gfxpnp_result' in data and 'error' not in data:
+            analysis_results.append(data)
+            file_name = os.path.basename(data.get('file_path', 'Unknown'))
+            result = data['gfxpnp_result']
+            total_samples = result.get('total_samples', 0)
+            num_columns = len(result.get('column_stats', {}))
+            attachment_results[attach_name].append(
+                f"{file_name} : Gfx PnP CSV processed successfully "
+                f"({total_samples} samples, {num_columns} stats columns)"
+            )
+        elif data and 'error' in data:
+            error_msg = data.get('error', 'Unknown error')
+            file_name = os.path.basename(data.get('file_path', 'Unknown'))
+            attachment_results[attach_name].append(
+                f"{file_name} : Gfx PnP CSV Processing Failed - {error_msg}"
+            )
+
+    def _handle_processing_error(self, file_path: str, attach_info: Dict,
+                                 error: Exception, attachment_results: Dict):
+        self._handle_common_processing_error(
+            log_prefix='GfxPnp',
+            file_path=file_path,
+            attach_info=attach_info,
+            error=error,
+            attachment_results=attachment_results,
+        )
+
+
+def process_gfxpnp_files():
+    """Process Gfx PnP (GTMetrics) CSV files found in the workspace."""
+    from utils.log_utils import load_all_csv_files_from_temp
+    all_csv_files = load_all_csv_files_from_temp()
+    if not all_csv_files:
+        return {}, []
+    processor = GfxPnpLogProcessor()
+    att_results, analysis_results = processor.coordinate_batch_processing(all_csv_files)
+    return att_results, analysis_results
 
 
 if __name__ == "__main__":
     # Parse positional argument for log type
-    parser = argparse.ArgumentParser(description='Log File Analyzer for GOP and Burnin Test logs')
+    parser = argparse.ArgumentParser(description='Log File Analyzer for GOP, Burnin Test, and PTAT logs')
     parser.add_argument(
         'log_type',
-        choices=['gop', 'burnin'],
-        help='Type of log analysis to perform: gop or burnin'
+        choices=['gop', 'burnin', 'ptat', 'gfxpnp'],
+        help='Type of log analysis to perform: gop, burnin, ptat, or gfxpnp'
     )
     args = parser.parse_args()
     
@@ -1779,8 +2388,8 @@ if __name__ == "__main__":
                 log_results=gop_analysis_results,
                 workspace=workspace
             )
-            
-            logging.info("GOP merge success: %s", gop_success)
+            if not gop_success:
+                logging.warning("GOP merge into attachment_info failed")
             
             # Output GOP results only
             output = {
@@ -1798,8 +2407,8 @@ if __name__ == "__main__":
                 log_results=burnin_analysis_results,
                 workspace=workspace
             )
-            
-            logging.info("Burnin merge success: %s", burnin_success)
+            if not burnin_success:
+                logging.warning("Burnin merge into attachment_info failed")
             
             # Output Burnin results only (cleaned up format)
             output = {
@@ -1817,7 +2426,69 @@ if __name__ == "__main__":
                     output["burnin_analysis_results"].append(clean_result)
             
             print(json.dumps(output, indent=2, ensure_ascii=False))
-        
+
+        elif args.log_type == 'ptat':
+            # Process PTAT CSV files only
+            ptat_attachment_results, ptat_analysis_results = process_ptat_files()
+
+            # Merge PTAT results
+            ptat_success = merge_log_results_to_attachment_info(
+                log_type='ptat',
+                log_results=ptat_analysis_results,
+                workspace=workspace
+            )
+            if not ptat_success:
+                logging.warning("PTAT merge into attachment_info failed")
+
+            # Output PTAT results
+            output = {"ptat_analysis_results": []}
+
+            for result in ptat_analysis_results:
+                if result.get('processed') and 'ptat_result' in result:
+                    pr = result['ptat_result']
+                    output["ptat_analysis_results"].append({
+                        "file_path": result['file_path'],
+                        "log_type": result.get('log_type', 'ptat_csv'),
+                        "processed": True,
+                        "total_samples": pr.get('total_samples'),
+                        "duration_seconds": pr.get('duration_seconds'),
+                        "gfx_freq_stats": pr.get('gfx_freq_stats'),
+                        "gt_clip_events": pr.get('gt_clip_events'),
+                        "unique_clip_reasons": pr.get('unique_clip_reasons'),
+                        "plot_path": pr.get('plot_path'),
+                    })
+
+            print(json.dumps(output, indent=2, ensure_ascii=False))
+
+        elif args.log_type == 'gfxpnp':
+            # Process Gfx PnP (GTMetrics) CSV files only
+            gfxpnp_attachment_results, gfxpnp_analysis_results = process_gfxpnp_files()
+
+            gfxpnp_success = merge_log_results_to_attachment_info(
+                log_type='gfxpnp',
+                log_results=gfxpnp_analysis_results,
+                workspace=workspace
+            )
+            if not gfxpnp_success:
+                logging.warning("GfxPnp merge into attachment_info failed")
+
+            output = {"gfxpnp_analysis_results": []}
+
+            for result in gfxpnp_analysis_results:
+                if result.get('processed') and 'gfxpnp_result' in result:
+                    gr = result['gfxpnp_result']
+                    output["gfxpnp_analysis_results"].append({
+                        "file_path": result['file_path'],
+                        "log_type": result.get('log_type', 'gfxpnp_csv'),
+                        "processed": True,
+                        "total_samples": gr.get('total_samples'),
+                        "duration_seconds": gr.get('duration_seconds'),
+                        "column_stats": gr.get('column_stats'),
+                        "plot_path": gr.get('plot_path'),
+                    })
+
+            print(json.dumps(output, indent=2, ensure_ascii=False))
+
     except Exception as e:
         # Output error as JSON for tool compatibility
         log_type_key = f"{args.log_type}_analysis_results" if hasattr(args, 'log_type') else "error_analysis_results"

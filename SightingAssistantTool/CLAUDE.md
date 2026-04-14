@@ -256,19 +256,19 @@ Typical contents during a `sighting_assistant` run:
 $GNAI_TEMP_WORKSPACE/                              ← session root, cleaned up after chat ends
 ├── hsd_info_file                                  ← output of sighting_read_article tool
 ├── attachment_info_file                           ← output of sighting_attachments tool
-├── all_log_txt_files.json                         ← index of all extracted log/txt files
+├── all_log_txt_trace_csv_files.json               ← index of all extracted log/txt/trace/csv files
 ├── messages.json                                  ← conversation message history (internal)
 ├── extracted_<attachment_id>/                     ← one dir per HSD attachment, named by ID
 │   └── <zip_or_folder_name>/
 │       └── <extracted file(s)>                    ← contents vary by attachment type
 └── persistent_logs/                               ← individual log files extracted from ZIPs
-    ├── <hsd_id>_<log_file_1.txt>                  ← named <hsd_id>_<original_filename>
-    └── <hsd_id>_<log_file_n.txt>
+  ├── <attachment_id>_<log_file_1.txt>           ← named <attachment_id>_<original_filename>
+  └── <attachment_id>_<log_file_n.txt>
 ```
 
 **Key points for tool authors:**
 - `extracted_<attachment_id>/` — directory name is the HSD attachment ID, not the filename. Created by `sighting_attachments` / `check_attachments.py`.
-- `persistent_logs/` — individual files unpacked from ZIPs and renamed with the HSD ID prefix so multiple HSD attachments don't collide.
+- `persistent_logs/` — individual files unpacked from ZIPs and renamed with the HSD attachment ID prefix so multiple attachments don't collide.
 - `hsd_info_file` / `attachment_info_file` — these are plain text output files written by tool scripts; their paths are passed as params between tools.
 - `messages.json` — GNAI internal file; do NOT read or write this from tool scripts.
 - The entire directory is deleted when the chat session ends — never store anything here that needs to survive across sessions.
@@ -330,7 +330,8 @@ run:
 - **DO** write large outputs to `$GNAI_TEMP_WORKSPACE/<filename>` and print only the file path.
 - Use `output_file:` in agent tools to auto-redirect LLM output to a file.
 - For agent tools that process large files, use `{{ readFileFromParam "param_name" }}` in the prompt rather than passing content via environment variables.
-
+- **sighting_gop_analyzer is conditional**
+- Only invoke `sighting_gop_analyzer` when at least one `.log` or `.txt` filename contains a GOP indicator (`gop`, `uefi`, `preos`, `bios`, `intelgop`, `intelugop`, `intelpeim`, `boot`). STC system trace logs (e.g. `*_STC.log`) are NOT GOP logs and must not trigger the tool. If no GOP indicators are found, write "No GOP logs detected" in section 1.3.3 and skip the call entirely. This prevents wasted LLM cycles on non-GOP log files.
 ### Tool Description Quality
 - The `description:` field is critical — the LLM uses it to decide when to invoke the tool.
 - Be specific and include trigger keywords: "Use when...", "Call this when..."
@@ -746,6 +747,42 @@ subprocess.run(['cmd', '/c', 'start', 'GDHM Analysis', '/wait', 'cmd', '/c', bat
 
 **SightingAssistantTool uses subprocess pattern** for sherlog and displaydebugger because we need to invoke their full agentic workflows, not just individual tools.
 
+### 19.4 Internal RAG Integration for DFD Checklist + BKM
+
+**Verified:** March 2026 on `sighting_assistant` runtime logs.
+
+DFD checklist compliance and category-specific BKM guidance are now retrieved through a local wrapper tool instead of legacy static BKM/checklist YAML tools.
+
+**Tool:** `sighting_rag_search`  
+**Files:** `tools/sighting_rag_search.yaml` + `src/sighting_rag_search.py`
+
+**Runtime contract (important):**
+- Input params are `search_query`, `profile`, and `max_documents`
+- Section 4 calls must set `profile=gpu-debug` on first attempt
+- Mandatory checklist query is deterministic (`MANDATORY_CHECKLIST_QUERY`)
+- BKM query is deterministic and category/scenario-based (`BKM_QUERY` with `{Category}` + `{Main Issue}`)
+- Section 4 output must render checklist table with exact columns: `Checklist Item | Description | Yes/No`
+
+**Why this exists:**
+- GNAI runtime may rewrite/normalize reserved parameter names (especially `question`) at execution time
+- Using a local wrapper with non-reserved `search_query` avoids that rewrite path and keeps calls deterministic
+
+**Implementation notes:**
+- Wrapper reads `GNAI_INPUT_SEARCH_QUERY`, `GNAI_INPUT_PROFILE`, `GNAI_INPUT_MAX_DOCUMENTS`
+- `GNAI_URL` is optional; defaults to `https://gnai.intel.com/api`
+- Uses raw `requests` + HTTP Basic Auth (`base64(INTEL_USERNAME:INTEL_PASSWORD)`); **no `gnai.client` dependency** (refactored in SGQE-21505)
+- Calls `POST /rag/vector/search?profile=<profile>&retrieval_type=hybrid&max_documents=<n>` with body `{"question": "...", "filters": {}}`
+- Tool returns `tool-result/v1` payload for clean agent ingestion
+
+**Legacy tools removed (do not reintroduce):**
+- `tools/sighting_mandatory_dfd_analyzer.yaml`
+- `tools/sighting_display_bkm.yaml`
+- `tools/sighting_media_bkm.yaml`
+- `tools/sighting_game_bkm.yaml`
+- `tools/sighting_ml_content_bkm.yaml`
+- `tools/sighting_bsod_tdr_hang_bkm.yaml`
+- `tools/sighting_yellow_bang_bkm.yaml`
+
 ---
 
 ## 20. Known Issues / Workarounds
@@ -764,6 +801,14 @@ urllib3.disable_warnings()
 response = requests.get(url, auth=HTTPKerberosAuth(), verify=False, ...)
 ```
 
+### Reserved Tool Param Rewrite for `question` in RAG Calls (as of Mar 2026)
+Observed in runtime logs: calls that transit reserved argument names like `question` may be rewritten and fail under nested delegation paths.
+
+**Workaround:**
+- Use `sighting_rag_search` wrapper with non-reserved param `search_query`
+- Avoid nested arg remapping to `question`
+- Keep deterministic Section 4 calls in `sighting_assistant.yaml`
+
 ---
 
-*Last updated: 2026-02-26 | Sources: https://gpusw-docs.intel.com/services/gnai/ + https://gpusw-docs.intel.com/services/gnai/faq/ + https://github.com/intel-sandbox/displaydebugger*
+*Last updated: 2026-03-11 | Sources: https://gpusw-docs.intel.com/services/gnai/ + https://gpusw-docs.intel.com/services/gnai/faq/ + https://github.com/intel-sandbox/displaydebugger*

@@ -50,6 +50,8 @@ dt gnai ask "What is the summary of HSD id 15018275324" --assistant sighting_ass
 | 4h | Display Debugger integration (GOP + ETL) | DONE |
 | 4i | MeAna tool integration (GPUView logs) | TBD |
 | 4j | Dispdiag tool integration (Dispdiag.dat) | TBD |
+| 4k | PTAT Monitor CSV analysis | DONE |
+| 4l | GfxPnp (GTMetrics) CSV analysis | DONE |
 | 5 | Provide analysis result and suggestion | DONE |
 | 6 | Prompt triage BKM to user according to issue type, post on HSD | ONGOING |
 
@@ -63,7 +65,7 @@ sighting_get_category classifies issues into one of:
   Corruption, BSOD, TDR, Underrun, App Crash, Hard Hang, Black Screen,
   Yellow Bang, WHQL, IGCC/IGS/ARC, GOP, DPMO, Installer, AI
 
-Category determines which BKM tool is invoked in Phase 2 (see Section 7).
+Category is used to construct the category-specific RAG query in Phase 2 (see Section 7).
 
 ---
 
@@ -80,33 +82,41 @@ User: "Analyze HSD 14026871374"
 |     writes -> hsd_info_file                 |
 |  2. sighting_attachments                    |
 |     writes -> attachment_info_file          |
-|               all_log_txt_files.json        |
+|               all_log_txt_trace_csv_files.json |
 |               extracted_*/                  |
 |               persistent_logs/              |
-|  3. sighting_get_category                   |
-|     reads -> hsd_info_file                  |
-|  4. [if GDHM IDs found]                     |
-|     sighting_sherlog_sync                   |
-|  5. sighting_gop_analyzer                   |
-|     pre: log_file_analyzer.py               |
-|  6. [if display logs found]                  |
-|     sighting_displaydebugger                |
-|     → intelligent analysis_focus from HSD   |
 +--------------------+------------------------+
                      |
                      v
 +---------------------------------------------+
 |          PHASE 2 - Analysis                 |
 |                                             |
-|  7. sighting_mandatory_dfd_analyzer         |
-|  8. [category-specific BKM tool]            |
-|     - sighting_display_bkm                  |
-|     - sighting_media_bkm                    |
-|     - sighting_game_bkm                     |
-|     - sighting_ml_content_bkm               |
-|     - sighting_bsod_tdr_hang_bkm            |
-|     - sighting_yellow_bang_bkm              |
-|  9. sighting_similarity_search              |
+|  3. sighting_get_category                   |
+|     reads -> hsd_info_file                  |
+|             + attachment_info_file          |
+|  4. sighting_rag_search (Mandatory DFD)     |
+|     query: MANDATORY_CHECKLIST_QUERY        |
+|     profile: gpu-debug                      |
+|  5. sighting_rag_search (Category BKM)      |
+|     query: BKM_QUERY({Category}, issue)     |
+|     profile: gpu-debug                      |
+|  6. [if GOP filename indicators found]      |
+|     sighting_gop_analyzer                   |
+|     pre: log_file_analyzer.py               |
+|  7. sighting_similarity_search              |
+|  8. [if display logs found]                 |
+|     sighting_displaydebugger                |
+|     → intelligent analysis_focus from HSD   |
+|  9. [if burnin logs found]                  |
+|     sighting_burnin_log_analyzer            |
+|  10. [if GDHM IDs found]                    |
+|     sighting_sherlog_sync                   |
+|  11. [if PTAT Monitor CSV found]            |
+|     sighting_ptat_analyzer                  |
+|     pre: log_file_analyzer.py ptat          |
+|  12. [if GTMetrics CSV found]               |
+|     sighting_gfxpnp_analyzer                |
+|     pre: log_file_analyzer.py gfxpnp        |
 +--------------------+------------------------+
                      |
                      v
@@ -115,16 +125,14 @@ User: "Analyze HSD 14026871374"
 
 ---
 
-## 7. Category to BKM Tool Routing
+## 7. Category to RAG BKM Routing
 
-| Category | BKM Tool |
-|----------|----------|
-| Display, Display Audio, GOP, Black Screen, Underrun | sighting_display_bkm |
-| Media, GPUView | sighting_media_bkm |
-| Gaming, Corruption, Performance | sighting_game_bkm |
-| AI, Content Protection | sighting_ml_content_bkm |
-| BSOD, TDR, Hard Hang, App Crash | sighting_bsod_tdr_hang_bkm |
-| Yellow Bang, WHQL, IGCC/IGS/ARC, DPMO, Installer, Others | sighting_yellow_bang_bkm |
+The assistant no longer routes to category-specific static BKM tools. Instead, it builds `BKM_QUERY` using detected category and main issue text, then invokes `sighting_rag_search` with `profile=gpu-debug`.
+
+| Category Group | RAG Behavior |
+|---------------|--------------|
+| Any supported category from Section 5 | Build category-aware `BKM_QUERY` and fetch log-collection BKM guidance from DFD-related wiki content |
+| Unknown / low-confidence category | Use fallback category text and still query via `sighting_rag_search` |
 
 ---
 
@@ -162,7 +170,7 @@ Classifies into one of the 20 categories in Section 5. Used in Step 3 to determi
 |-------|-------|
 | Tool YAML | tools/sighting_attachments.yaml |
 | Script | src/check_attachments.py |
-| Output | attachment_info_file, all_log_txt_files.json, extracted_*/, persistent_logs/ |
+| Output | attachment_info_file, all_log_txt_trace_csv_files.json, extracted_*/, persistent_logs/ |
 
 #### Wave-1: Parsing / Processing of Logs
 
@@ -173,7 +181,7 @@ Processing phases in order:
 4. Parallel Download  ThreadPoolExecutor (8 workers) with duplicate detection
 5. Archive Extraction  unpacks 7z and zip; categorizes into ETL / LOG / TXT
 6. Analysis  driver info extraction, ETL classification, pipe underrun detection
-7. Shared Index  populates all_log_txt_files.json; copies to persistent_logs/ with <hsd_id>_ prefix
+7. Shared Index  populates all_log_txt_trace_csv_files.json; copies to persistent_logs/ with <attachment_id>_ prefix
 8. GOP Processing  detects and parses GOP logs; merges results back into attachment structure
 9. Output  dumps to attachment_info_file in GNAI_TEMP_WORKSPACE
 
@@ -306,6 +314,64 @@ Invoked when display-related logs (GOP or ETL) are found in attachments AND the 
 
 ---
 
+#### E. PTAT Monitor CSV Analysis
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_ptat_analyzer.yaml |
+| Type | Agent Tool (run.pre + LLM prompt) |
+| Script | src/log_file_analyzer.py ptat |
+| Class | `PTATLogProcessor` |
+| Required Params | `id` (HSD ID), `sighting_ptat_analyzer_output_file` (optional) |
+| Trigger | CSV file with "PTATMonitor" or "ptat" in filename |
+
+**Detection:** Reads CSV header; requires `Relative Time(mS)`, `Gfx Component-Current Slice-Gfx Frequency(MHz)`, and `Turbo Parameters-Gt Clip Reason` columns.
+
+**Key Metrics Extracted:**
+
+| Metric | Detail |
+|--------|--------|
+| GFX Frequency | min / max / avg MHz |
+| GT Clip Events | Total count of rows with non-empty clip reason values |
+| Unique Clip Reasons | Deduplicated set of clip reason strings |
+| Duration | Total recording duration in seconds |
+| Total Samples | Row count |
+| Plot | Dark-themed multi-series PNG → `.output/PTAT_logs_plots/` (filename/header use HSD ID prefix) |
+
+**Plot Series:** CPU P-Core/E-Core avg frequency, IA/GT/Package/Rest-of-Package power (watts). GT clip shown as binary (0/1) fill on a separate bottom subplot.
+
+**Merged into attachment_info_file:** `ptat_analysis` key at top-level via `_merge_ptat_results()`.
+
+---
+
+#### F. GfxPnp (GTMetrics) CSV Analysis
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_gfxpnp_analyzer.yaml |
+| Type | Agent Tool (run.pre + LLM prompt) |
+| Script | src/log_file_analyzer.py gfxpnp |
+| Class | `GfxPnpLogProcessor` |
+| Required Params | `id` (HSD ID), `sighting_gfxpnp_analyzer_output_file` (optional) |
+| Trigger | CSV file with "GTMetrics" or "gfxpnp" in filename |
+
+**Detection:** Reads CSV header; requires `Time[Sec]`, `RenderFreqEffective[MHz]`, `IaBias`, `RenderBias`, `MediaBias` columns.
+
+**Key Metrics Extracted:**
+
+| Metric | Detail |
+|--------|--------|
+| Column Stats | min / max / avg per column |
+| Duration | Total recording duration in seconds |
+| Total Samples | Row count |
+| Plot | Dark-themed per-column subplots → `.output/GfxPnp_logs_plots/` (filename/header use HSD ID prefix) |
+
+**Plot Series (one subplot each):** `RenderFreqEffective[MHz]` (cyan), `IaBias` (purple), `RenderBias` (red), `MediaBias` (orange). Average line overlay per subplot.
+
+**Merged into attachment_info_file:** `gfxpnp_analysis` key at top-level via `_merge_gfxpnp_results()`.
+
+---
+
 ### 8.4 Step 4 - Similar HSDs
 
 | Field | Value |
@@ -317,11 +383,28 @@ Returns top 5 most similar past HSDs with confidence scores.
 
 ---
 
-### 8.5 Step 5 - Summary Generation and Final Output
+### 8.5 DFD Checklist and BKM Retrieval via RAG
+
+| Field | Value |
+|-------|-------|
+| Tool YAML | tools/sighting_rag_search.yaml |
+| Script | src/sighting_rag_search.py |
+| Input Params | `search_query`, `profile`, `max_documents` |
+| Profile Policy | Only `gpu-debug` profile is supported (hard-enforced). |
+
+Execution behavior:
+1. Query mandatory checklist with a deterministic `MANDATORY_CHECKLIST_QUERY`.
+2. Query category/scenario guidance with deterministic `BKM_QUERY`.
+3. Render Section 4 checklist table with columns `Checklist Item | Description | Yes/No`.
+4. If retrieval is empty, emit explicit fallback rows rather than silently skipping Section 4.
+
+---
+
+### 8.6 Step 5 - Summary Generation and Final Output
 
 | Section | Content |
 |---------|---------|
-| 1. Content Extraction & Summary | HSD details, attachments, GOP analysis, driver info, regression, RVP status |
+| 1. Content Extraction & Summary | HSD details, attachments, GOP/PTAT/GfxPnp analysis, driver info, regression, RVP status |
 | 2. Issue Classification | Category, confidence, reasoning |
 | 3. Attachment Verification | Expected vs present vs missing, validity per category |
 | 4. Suggestions as per DFD Checklist | DFD compliance table, BKM output, recommendations |
@@ -342,7 +425,7 @@ Observed layout (verified 2026-02-18):
 $GNAI_TEMP_WORKSPACE/
  hsd_info_file                         <- sighting_read_article output
  attachment_info_file                  <- sighting_attachments output
- all_log_txt_files.json                <- index of all log/txt files
+ all_log_txt_trace_csv_files.json      <- index of all log/txt/trace/csv files
  messages.json                         <- GNAI internal - DO NOT TOUCH
  extracted_<attachment_id_1>/          <- named by attachment ID (numeric)
     SKU1-4 Burnin GPGPU FAIL/
@@ -353,14 +436,14 @@ $GNAI_TEMP_WORKSPACE/
     IntError_2886.txt
     IntError_4070.txt
  persistent_logs/
-     <hsd_id>_<filename_1>.txt         <- hsd_id prefix prevents collisions
-     <hsd_id>_<filename_2>.txt
-     <hsd_id>_<filename_n>.txt
+  <attachment_id>_<filename_1>.txt  <- attachment id prefix prevents collisions
+  <attachment_id>_<filename_2>.txt
+  <attachment_id>_<filename_n>.txt
 ```
 
 Naming Rules:
 - extracted_<attachment_id>/  named by numeric HSD attachment ID, not filename
-- persistent_logs/<hsd_id>_<original_filename>  prefix prevents name collisions
+- persistent_logs/<attachment_id>_<original_filename>  prefix prevents name collisions
 - messages.json  GNAI internal; tool scripts must never read or write this
 - Workspace deleted when chat session ends
 
@@ -377,19 +460,13 @@ Naming Rules:
 | sighting_sherlog_sync.yaml | src/sherlog_subprocess.py | Run Sherlog on GDHM dump IDs |
 | sighting_displaydebugger.yaml | src/displaydebugger_subprocess.py | DisplayDebugger GOP + ETL deep analysis |
 | sighting_similarity_search.yaml | src/similarity_search.py | Top-5 similar past HSDs |
-| sighting_mandatory_dfd_analyzer.yaml |  | DFD checklist compliance |
-| sighting_display_bkm.yaml |  | Display BKM checks |
-| sighting_media_bkm.yaml |  | Media BKM checks |
-| sighting_game_bkm.yaml |  | Game BKM checks |
-| sighting_ml_content_bkm.yaml |  | AI/ML BKM checks |
-| sighting_bsod_tdr_hang_bkm.yaml |  | BSOD/TDR/Hang BKM checks |
-| sighting_yellow_bang_bkm.yaml |  | Other/unknown BKM checks |
+| sighting_rag_search.yaml | src/sighting_rag_search.py | DFD mandatory checklist + category BKM retrieval via RAG |
 
 ### Agent Tools
 
 | Tool YAML | Model | Purpose |
 |-----------|-------|---------|
-| sighting_gop_analyzer.yaml | claude-4-5-opus-thinking | Analyze GOP logs, structured table output |
+| sighting_gop_analyzer.yaml | claude-4-5-opus-thinking | Analyze GOP logs, structured table output. **Conditional:** only invoked when a `.log`/`.txt` filename contains GOP indicators (`gop`, `uefi`, `preos`, `bios`, `intelgop`, `intelugop`, `intelpeim`, `boot`). STC system trace logs never trigger this tool. |
 | sighting_get_category.yaml |  | Classify issue category |
 
 ### Supporting Scripts
@@ -423,7 +500,7 @@ Naming Rules:
 | 1 | console_output: "" on several tools silently drops errors | Open |
 | 2 | No timeout: on sighting_sherlog_sync  may hit platform default | Open |
 | 3 | sighting_gop_analyzer prompt uses non-standard {{.gop_analysis_results}} syntax | Open |
-| 4 | BKM tool selection is LLM-driven; fails silently if sighting_get_category errors | Open |
+| 4 | RAG answer quality depends on wiki indexing quality and profile coverage (`gpu-debug`) | Open |
 | 5 | Burnin log analyzer skill (SGQE-21307)  sub-agent cannot run Python, redesigned | PR #16 open |
 | 6 | ~~Cross-toolkit transfer (Display Debugger)~~ | **DONE** — validated with `gnai --log-file` pattern |
 
@@ -464,4 +541,4 @@ Naming Rules:
 
 ---
 
-*Last updated: 2026-02-26*
+*Last updated: 2026-03-06*

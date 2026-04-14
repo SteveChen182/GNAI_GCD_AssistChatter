@@ -12,6 +12,7 @@ into the attachment_info_file for state maintenance across different log process
 Supported log types:
 - GOP (Graphics Output Protocol) logs
 - Burnin Test logs
+- PTAT logs
 - Future log types can be easily added
 """
 
@@ -21,6 +22,7 @@ import json
 import tempfile
 import os
 import logging
+import re
 
 class LogProcessor(ABC):
     """Abstract base class for log processors."""
@@ -110,51 +112,163 @@ class LogProcessor(ABC):
         )
         logging.error(f"[{log_prefix}] Exception processing {file_name}: {str(error)}")
 
-def load_all_log_txt_files_from_temp():
-    """Load all_log_txt_files structure from temporary JSON file created by check_attachments.py
-    
-    Note: Despite the function name containing 'txt', this loads .txt, .log, and .trace files.
+
+def build_hsd_prefixed_output_name(
+    file_name_or_path: str,
+    hsd_id: Optional[str] = None,
+) -> str:
+    """Return <hsd_id>_<normalized_filename> for user-facing output files.
+
+    - Accepts either a filename or full path.
+    - If input is prefixed like <attachment_id>_<name>, removes the numeric prefix.
+    - Always preserves the source extension.
+    - If HSD ID is not available (arg and env missing), returns the original basename.
+    - HSD ID lookup order: explicit arg -> env (`GNAI_INPUT_HSD_ID`, `GNAI_INPUT_ID`).
+    - PTAT/GfxPnp call this helper only after `check_attachments.py` copies files into
+      `persistent_logs/` using `<attachment_id>_<original_filename>` naming.
+    - Because of that guaranteed format, stripping the leading numeric prefix is
+      intentional and safe for the current PTAT/GfxPnp pipeline.
+    - If this helper is reused outside `persistent_logs/`, re-check whether leading
+      numeric prefixes are meaningful parts of the real filename.
+
+    Examples:
+    - build_hsd_prefixed_output_name(
+            "C:/temp/persistent_logs/16029447857_PTATMonitor.csv",
+            hsd_id="18040537448",
+        )
+        -> "18040537448_PTATMonitor.csv"
+
+    - build_hsd_prefixed_output_name(
+            "16029476866_GTMetrics.csv",
+            hsd_id="18040537448",
+        )
+        -> "18040537448_GTMetrics.csv"
+
+    - build_hsd_prefixed_output_name("raw_metrics.csv", hsd_id="18040537448")
+        -> "18040537448_raw_metrics.csv"
+
+    - build_hsd_prefixed_output_name("raw_metrics.csv", hsd_id=None)  # no env HSD ID
+        -> "raw_metrics.csv"
     """
-    
+    base_name = os.path.basename(file_name_or_path)
+    name_only, extension = os.path.splitext(base_name)
+
+    normalized_name = re.sub(r'^\d+_', '', name_only)
+
+    resolved_hsd = (
+        hsd_id
+        or os.environ.get('GNAI_INPUT_HSD_ID')
+        or os.environ.get('GNAI_INPUT_ID')
+        or ''
+    ).strip()
+    if not resolved_hsd:
+        return base_name
+
+    safe_hsd_id = re.sub(r'[^0-9A-Za-z_-]+', '_', resolved_hsd)
+    return f"{safe_hsd_id}_{normalized_name}{extension}"
+
+def load_all_log_txt_trace_files_from_temp():
+    """Load log/txt/trace files from the combined JSON index created by check_attachments.py."""
     current_workspace = os.environ.get('GNAI_TEMP_WORKSPACE', '.')
-    
-    # Try to find the temp file in common locations
+
+    # Try combined index in multiple locations
     possible_paths = [
-        os.path.join(current_workspace, 'all_log_txt_files.json'),  # Current workspace
-        'all_log_txt_files.json',  # Current directory
-        os.path.join(tempfile.gettempdir(), 'all_log_txt_files.json')  # System temp
+        os.path.join(current_workspace, 'all_log_txt_trace_csv_files.json'),
+        'all_log_txt_trace_csv_files.json',
+        os.path.join(tempfile.gettempdir(), 'all_log_txt_trace_csv_files.json'),
     ]
-    
-    logging.debug(f"Searching for JSON file in {len(possible_paths)} locations:")
-    for path in possible_paths:
-        logging.debug(f"- {path} (exists: {os.path.exists(path)})")
-    
+
     for temp_file_path in possible_paths:
         if os.path.exists(temp_file_path):
             try:
                 with open(temp_file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                
-                # Convert back to the tuple format
-                all_log_txt_files = []
+
+                result = []
                 for item in data:
                     file_path = item['file_path']
                     attach_info = item['attach_info']
-                    
+                    if file_path.lower().endswith('.csv'):
+                        continue  # CSV files handled by load_all_csv_files_from_temp
                     if os.path.exists(file_path):
-                        all_log_txt_files.append((file_path, attach_info))
+                        result.append((file_path, attach_info))
                     else:
                         logging.debug(f"File not found: {file_path}")
-                
-                logging.debug(f"Loaded {len(all_log_txt_files)} accessible files from JSON: {temp_file_path}")
-                return all_log_txt_files
-                
+
+                logging.debug(f"Loaded {len(result)} log/txt/trace files from JSON: {temp_file_path}")
+                return result
+
             except Exception as e:
                 logging.debug(f"Error loading from {temp_file_path}: {e}")
                 continue
-    
-    logging.debug("No all_log_txt_files data found. Run check_attachments.py first.")
+
+    logging.debug("No log/txt/trace file index found. Run check_attachments.py first.")
     return []
+
+
+def load_all_csv_files_from_temp():
+    """Return CSV files as (file_path, attach_info) tuples.
+
+    Loads from the combined all_log_txt_trace_csv_files.json index written by
+    check_attachments.py, filtering to .csv entries only.
+    Falls back to scanning the workspace directories for .csv files.
+    """
+    workspace = os.environ.get('GNAI_TEMP_WORKSPACE', '.')
+    csv_files = []
+
+    # Primary: load from combined index, filtering to .csv entries
+    json_path = os.path.join(workspace, 'all_log_txt_trace_csv_files.json')
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            for item in data:
+                file_path = item['file_path']
+                if not file_path.lower().endswith('.csv'):
+                    continue
+                attach_info = item.get('attach_info', {'document.file_name': os.path.basename(file_path)})
+                if os.path.exists(file_path):
+                    csv_files.append((file_path, attach_info))
+            if csv_files:
+                logging.debug(f"Loaded {len(csv_files)} CSV files from {json_path}")
+                return csv_files
+        except Exception as e:
+            logging.debug(f"Error loading {json_path}: {e}")
+
+    # Fallback: scan workspace directories
+    logging.debug("Scanning workspace for CSV files (fallback scan)...")
+    if os.path.isdir(workspace):
+        for entry in os.scandir(workspace):
+            if entry.is_dir() and entry.name.startswith('extracted_'):
+                for root, dirs, files in os.walk(entry.path):
+                    for file in files:
+                        if file.lower().endswith('.csv'):
+                            file_path = os.path.join(root, file)
+                            csv_files.append((file_path, {'document.file_name': file}))
+        # Also check workspace root for direct CSV attachments
+        for entry in os.scandir(workspace):
+            if entry.is_file() and entry.name.lower().endswith('.csv'):
+                csv_files.append((entry.path, {'document.file_name': entry.name}))
+        # Also check persistent_logs/ — Phase 4b copies CSVs there
+        persistent_logs_dir = os.path.join(workspace, 'persistent_logs')
+        if os.path.isdir(persistent_logs_dir):
+            for entry in os.scandir(persistent_logs_dir):
+                if entry.is_file() and entry.name.lower().endswith('.csv'):
+                    csv_files.append((entry.path, {'document.file_name': entry.name}))
+
+    # De-duplicate by absolute path to avoid repeated processing of the same file
+    unique_csv_files = []
+    seen_paths = set()
+    for file_path, attach_info in csv_files:
+        abs_path = os.path.abspath(file_path)
+        if abs_path in seen_paths:
+            continue
+        seen_paths.add(abs_path)
+        unique_csv_files.append((file_path, attach_info))
+
+    logging.debug(f"Found {len(unique_csv_files)} unique CSV files via workspace scan")
+    return unique_csv_files
+
 
 def merge_log_results_to_attachment_info(
     log_type: str,
@@ -234,11 +348,10 @@ def _merge_by_log_type(data: Dict, log_type: str, log_results: List[Dict]) -> bo
         return _merge_gop_results(data, log_results)
     elif log_type == 'burnin':
         return _merge_burnin_results(data, log_results)
-
-    #elif log_type == 'other':
-        #return _merge_other_log_results(data, log_results)
-    ## TO-DO
-    ## Add more log types here as needed
+    elif log_type == 'ptat':
+        return _merge_ptat_results(data, log_results)
+    elif log_type == 'gfxpnp':
+        return _merge_gfxpnp_results(data, log_results)
     else:
         logging.warning(f"Unsupported log type: {log_type}")
         return False
@@ -404,4 +517,47 @@ def _merge_burnin_results(data: Dict, burnin_results: List[Dict]) -> bool:
         
     except Exception as e:
         logging.error(f"Error merging Burnin results: {e}")
+        return False
+
+
+def _merge_ptat_results(data: Dict, ptat_results: List[Dict]) -> bool:
+    """Merge PTAT CSV analysis results into the attachment structure."""
+    try:
+        if 'summary' in data and 'file_type_counts' in data['summary']:
+            data['summary']['file_type_counts']['ptat_files'] = len(ptat_results)
+
+        # Store PTAT results at the top level of the data structure so the LLM can access them
+        data['ptat_analysis'] = []
+        for result in ptat_results:
+            if result.get('processed') and 'ptat_result' in result:
+                data['ptat_analysis'].append({
+                    'file': os.path.basename(result['file_path']),
+                    'ptat_result': result['ptat_result'],
+                })
+
+        return True
+
+    except Exception as e:
+        logging.error(f"Error merging PTAT results: {e}")
+        return False
+
+
+def _merge_gfxpnp_results(data: Dict, gfxpnp_results: List[Dict]) -> bool:
+    """Merge GfxPnp (GTMetrics) CSV analysis results into the attachment structure."""
+    try:
+        if 'summary' in data and 'file_type_counts' in data['summary']:
+            data['summary']['file_type_counts']['gfxpnp_files'] = len(gfxpnp_results)
+
+        data['gfxpnp_analysis'] = []
+        for result in gfxpnp_results:
+            if result.get('processed') and 'gfxpnp_result' in result:
+                data['gfxpnp_analysis'].append({
+                    'file': os.path.basename(result['file_path']),
+                    'gfxpnp_result': result['gfxpnp_result'],
+                })
+
+        return True
+
+    except Exception as e:
+        logging.error(f"Error merging GfxPnp results: {e}")
         return False

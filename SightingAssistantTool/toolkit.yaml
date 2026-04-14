@@ -18,6 +18,7 @@ template:
     - requests-kerberos==0.15.0; sys_platform == "win32"
     - py7zr
     - rich
+    - matplotlib
 run: {}
 dependencies:
   - name: displaydebugger

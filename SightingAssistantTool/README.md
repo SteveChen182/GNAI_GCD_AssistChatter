@@ -1,6 +1,10 @@
 # Sighting Assistant Tool
 
 
+## Demo page
+
+[Sighting Assistant Tool Demo](https://bookish-train-mv137v7.pages.github.io/)
+
 ## Introduction
 
 The Sighting Assistant Tool is a  [GNAI Toolkit](https://gpusw-docs.intel.com/services/gnai/developer/toolkits/) to enable Graphics Debug Engineers to accelerate issue resolution, gain deeper insights, and begin the debug process with a stronger starting point.
@@ -15,7 +19,13 @@ The Sighting Assistant Tool is a  [GNAI Toolkit](https://gpusw-docs.intel.com/se
 
 ## Architecture Overview (Current Implementation)
 
-![Architecture Diagram](./assets/SAT_Diagram_v1.svg) 
+<p align="center">
+   <a href="./assets/SAT_Diagram_v2.svg" target="_blank" rel="noopener noreferrer">
+      <img src="./assets/SAT_Diagram_v2.svg" alt="Architecture Diagram Preview" width="900" />
+   </a>
+</p>
+
+<p align="center">Click the diagram to open the full-size SVG in a new tab.</p>
 
 
 ---
@@ -87,6 +97,17 @@ Error cleaning python-site-packages: Error removing python-site-packages: open \
 
 **Solution:**
 Manually delete the annotated_types folder at the path specified in the error message.
+
+
+### Linux SSL Authorization failure
+Got 501 SSL Authorization failure in Linux environment. 
+
+**Solution:**
+1. Run `kinit <username>` to obtain a Kerberos token.
+2. Run `klist` to verify the Kerberos token currently in use.
+
+**Reference:**
+https://wiki.ith.intel.com/pages/viewpage.action?spaceKey=HSDESWIKI&title=Python#Python-Installrequestsmodule
 
 
 ## **Additional Resources**

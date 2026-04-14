@@ -1,5 +1,7 @@
 import os
 import sys
+import shutil
+import re
 from hsdes import HSDESAPI
 import mimetypes
 import py7zr
@@ -41,9 +43,9 @@ def download_attachment(hsd, attach, workspace):
 
 
 def extract_and_find_file_types(abs_filename, attach, workspace):
-    """Extract archive and find ETL, .log, .txt, and .trace files"""
+    """Extract archive and find ETL, .log, .txt, .trace, and .csv files"""
     if not os.path.exists(abs_filename):
-        return [], [], [], []
+        return [], [], [], [], []
     
     _, ext = os.path.splitext(abs_filename)
     attachment_extraction_path = os.path.join(workspace, f"extracted_{attach['id']}")
@@ -51,24 +53,29 @@ def extract_and_find_file_types(abs_filename, attach, workspace):
     dot_log_files = []
     dot_txt_files = []
     dot_trace_files = []
+    dot_csv_files = []
 
     # Check for direct file attachments (not archives)
     if ext.lower() == ".etl":
         logging.debug(f"Direct ETL file detected: {abs_filename}")
         etl_files.append((abs_filename, attach))
-        return etl_files, dot_log_files, dot_txt_files, dot_trace_files
+        return etl_files, dot_log_files, dot_txt_files, dot_trace_files, dot_csv_files
     elif ext.lower() == ".log":
         logging.debug(f"Direct .log file detected: {abs_filename}")
         dot_log_files.append((abs_filename, attach))
-        return etl_files, dot_log_files, dot_txt_files, dot_trace_files
+        return etl_files, dot_log_files, dot_txt_files, dot_trace_files, dot_csv_files
     elif ext.lower() == ".txt":
         logging.debug(f"Direct .txt file detected: {abs_filename}")
         dot_txt_files.append((abs_filename, attach))
-        return etl_files, dot_log_files, dot_txt_files, dot_trace_files
+        return etl_files, dot_log_files, dot_txt_files, dot_trace_files, dot_csv_files
     elif ext.lower() == ".trace":
         logging.debug(f"Direct .trace file detected: {abs_filename}")
         dot_trace_files.append((abs_filename, attach))
-        return etl_files, dot_log_files, dot_txt_files, dot_trace_files
+        return etl_files, dot_log_files, dot_txt_files, dot_trace_files, dot_csv_files
+    elif ext.lower() == ".csv":
+        logging.debug(f"Direct .csv file detected: {abs_filename}")
+        dot_csv_files.append((abs_filename, attach))
+        return etl_files, dot_log_files, dot_txt_files, dot_trace_files, dot_csv_files
 
     # Extract archives
     extraction_needed = False
@@ -81,7 +88,7 @@ def extract_and_find_file_types(abs_filename, attach, workspace):
             extraction_needed = True
         except Exception as e:
             logging.debug(f"[ERROR]: Failed to extract 7z file: {e}")
-            return [], [], [], []
+            return [], [], [], [], []
             
     elif ext.lower() == ".zip":
         try:
@@ -92,10 +99,10 @@ def extract_and_find_file_types(abs_filename, attach, workspace):
             extraction_needed = True
         except Exception as e:
             logging.debug(f"[ERROR]: Failed to extract zip file: {e}")
-            return [], [], [], []
+            return [], [], [], [], []
     else:
         logging.debug(f"Unsupported file extension: {ext}")
-        return [], [], [], []
+        return [], [], [], [], []
     
     # Search for all file types in extracted archives
     if extraction_needed:
@@ -110,8 +117,10 @@ def extract_and_find_file_types(abs_filename, attach, workspace):
                     dot_txt_files.append((file_path, attach))
                 elif file.lower().endswith(".trace"):
                     dot_trace_files.append((file_path, attach))
+                elif file.lower().endswith(".csv"):
+                    dot_csv_files.append((file_path, attach))
 
-    return etl_files, dot_log_files, dot_txt_files, dot_trace_files
+    return etl_files, dot_log_files, dot_txt_files, dot_trace_files, dot_csv_files
 
 
 def analyze_etl_file(etl_file_path_and_attach):
@@ -206,7 +215,7 @@ def build_etl_info(file_name, attachment_results, driver_versions_found, pipe_un
     }
 
 
-def build_attachment_structure(attachments, attachment_results, driver_versions_found, pipe_underrun_files, all_etl_files, all_log_txt_files):
+def build_attachment_structure(attachments, attachment_results, driver_versions_found, pipe_underrun_files, all_etl_files, all_log_txt_trace_files, all_csv_files=None):
     """Build attachment structure that leaves space for other log results to be merged later"""
     
     attachment_info = {}
@@ -240,11 +249,12 @@ def build_attachment_structure(attachments, attachment_results, driver_versions_
             attachment_info[attachment_name]['etl_info'] = etl_info
     
     # Add log/txt/trace files with placeholders for analysis
-    for log_path, attach_info in all_log_txt_files:
+    for log_path, attach_info in all_log_txt_trace_files:
         attachment_name = attach_info['document.file_name']
         original_file_name = os.path.basename(log_path)
         
-        # Remove ID prefix if present (123_filename.txt -> filename.txt)
+        # These paths come from persistent_logs where files are named
+        # <attachment_id>_<original_filename>. Strip only that leading attachment ID.
         if '_' in original_file_name and original_file_name.startswith(str(attach_info['id'])):
             file_name = '_'.join(original_file_name.split('_')[1:])
         else:
@@ -289,7 +299,34 @@ def build_attachment_structure(attachments, attachment_results, driver_versions_
                 attachment_info[attachment_name]['sub_attachments'][file_name] = {"trace_info": trace_info}
             else:
                 attachment_info[attachment_name]['trace_info'] = trace_info
-    
+
+    # Add CSV files (PTAT / GfxPnp logs) with placeholder for analysis
+    for csv_path, attach_info in (all_csv_files or []):
+        attachment_name = attach_info['document.file_name']
+        original_file_name = os.path.basename(csv_path)
+
+        # These paths come from persistent_logs where files are named
+        # <attachment_id>_<original_filename>. Strip only that leading attachment ID.
+        if '_' in original_file_name and original_file_name.startswith(str(attach_info['id'])):
+            file_name = '_'.join(original_file_name.split('_')[1:])
+        else:
+            file_name = original_file_name
+
+        if attachment_name not in attachment_info:
+            continue
+
+        csv_info = {
+            "csv_type": "pending_analysis",
+            "csv_analysis_results": {
+                "status": "pending"
+            }
+        }
+
+        if attachment_info[attachment_name]['attachment_type'] == 'archive':
+            attachment_info[attachment_name]['sub_attachments'][file_name] = {"csv_info": csv_info}
+        else:
+            attachment_info[attachment_name]['csv_info'] = csv_info
+
     return attachment_info
 
 
@@ -311,16 +348,16 @@ if __name__ == "__main__":
     logging.debug("PHASE 1: DOWNLOADING ALL ATTACHMENTS")
     logging.debug("=" * 50)
 
-    # Phase 1: Download all attachments 
+    # Phase 1: Download all attachments
     downloaded_attachments = []
     with ThreadPoolExecutor(max_workers=8) as executor:
         download_futures = {
-            executor.submit(download_attachment, hsd, attach, workspace): attach 
+            executor.submit(download_attachment, hsd, attach, workspace): attach
             for attach in attachments
         }
-        
         for future in as_completed(download_futures):
             result = future.result()
+            attach = download_futures[future]
             if result[0] is not None:
                 downloaded_attachments.append(result)
     
@@ -333,26 +370,27 @@ if __name__ == "__main__":
     all_log_files = []
     all_txt_files = []
     all_trace_files = []
-    
+    all_csv_files = []
+
     with ThreadPoolExecutor(max_workers=6) as executor:
         extract_futures = {
             executor.submit(extract_and_find_file_types, abs_filename, attach, workspace): attach
             for abs_filename, attach, was_skipped in downloaded_attachments
         }
-        
         for future in as_completed(extract_futures):
             attach = extract_futures[future]
-            etl_files, log_files, txt_files, trace_files = future.result()
-            
+            etl_files, log_files, txt_files, trace_files, csv_files = future.result()
+
             all_etl_files.extend(etl_files)
             all_log_files.extend(log_files)
             all_txt_files.extend(txt_files)
             all_trace_files.extend(trace_files)
-            
-            if etl_files or log_files or txt_files or trace_files:
-                logging.debug(f"Found {len(etl_files)} ETL, {len(log_files)} .log, {len(txt_files)} .txt, {len(trace_files)} .trace file(s) in {attach['document.file_name']}")
+            all_csv_files.extend(csv_files)
+
+            if etl_files or log_files or txt_files or trace_files or csv_files:
+                logging.debug(f"Found {len(etl_files)} ETL, {len(log_files)} .log, {len(txt_files)} .txt, {len(trace_files)} .trace, {len(csv_files)} .csv file(s) in {attach['document.file_name']}")
     
-    logging.debug(f"\nTotal files found: {len(all_etl_files)} ETL, {len(all_log_files)} .log, {len(all_txt_files)} .txt, {len(all_trace_files)} .trace")
+    logging.debug(f"\nTotal files found: {len(all_etl_files)} ETL, {len(all_log_files)} .log, {len(all_txt_files)} .txt, {len(all_trace_files)} .trace, {len(all_csv_files)} .csv")
     
     # Phase 3: Analyze ETL files 
     attachment_results = defaultdict(list)
@@ -368,9 +406,9 @@ if __name__ == "__main__":
                     executor.submit(analyze_etl_file, (etl_path, attach_info)): (etl_path, attach_info)
                     for etl_path, attach_info in all_etl_files
                 }
-                
                 for future in as_completed(analysis_futures):
                     result = future.result()
+                    etl_path, _ = analysis_futures[future]
                     if len(result) == 4:
                         attach_document_file_name, result_string, driver_data, pipe_underrun = result
                     else:
@@ -401,9 +439,9 @@ if __name__ == "__main__":
                     executor.submit(analyze_etl_file, (etl_path, attach_info)): (etl_path, attach_info)
                     for etl_path, attach_info in all_etl_files
                 }
-                
                 for future in as_completed(analysis_futures):
                     result = future.result()
+                    etl_path, _ = analysis_futures[future]
                     if len(result) == 4:
                         attach_document_file_name, result_string, driver_data, pipe_underrun = result
                     else:
@@ -425,59 +463,78 @@ if __name__ == "__main__":
                             'file': os.path.basename(result_string.split(' : ')[0])
                         })
 
-    # Phase 4: Process .log, .txt, and .trace files using log_file_analyzer.py 
-    all_log_txt_files = all_log_files + all_txt_files + all_trace_files
+    # Phase 4: Copy all extracted files (log/txt/trace/csv) to persistent_logs/ and save combined index
+    all_log_txt_trace_files = all_log_files + all_txt_files + all_trace_files
+
     persistent_log_dir = os.path.join(workspace, 'persistent_logs')
     os.makedirs(persistent_log_dir, exist_ok=True)
 
-    # Copy all log/txt/trace files to persistent location
-    all_log_txt_files_persistent = []
-    for file_path, attach_info in all_log_txt_files:
+    all_log_txt_trace_csv_persistent = []
+    used_persistent_names = set()
+    for file_path, attach_info in all_log_txt_trace_files + all_csv_files:
         if os.path.exists(file_path):
-            # Create new filename to avoid conflicts
             base_name = os.path.basename(file_path)
-            # Add attachment ID to make filename unique
             safe_name = f"{attach_info['id']}_{base_name}"
-            persistent_path = os.path.join(persistent_log_dir, safe_name)
-            
+
+            # Prefer readable disambiguation for extracted archive files by embedding
+            # part of their relative path, e.g. <id>_folder__subfolder_<basename>.
+            extracted_prefix = os.path.join(workspace, f"extracted_{attach_info['id']}")
             try:
-                import shutil
+                common_root = os.path.commonpath([os.path.abspath(file_path), os.path.abspath(extracted_prefix)])
+            except ValueError:
+                common_root = ""
+
+            if common_root == os.path.abspath(extracted_prefix):
+                rel_from_extracted = os.path.relpath(file_path, extracted_prefix)
+                rel_dir = os.path.dirname(rel_from_extracted)
+                if rel_dir and rel_dir != '.':
+                    rel_token = rel_dir.replace('\\', '__').replace('/', '__')
+                    rel_token = re.sub(r'[^A-Za-z0-9._-]+', '-', rel_token).strip('-_')
+                    if rel_token:
+                        safe_name = f"{attach_info['id']}_{rel_token}_{base_name}"
+
+            if safe_name in used_persistent_names:
+                # Collision resolution: keep names readable by appending _2, _3, ...
+                # to the already path-disambiguated candidate. 
+                # This is preferred over using hashes to keep names readable for user.
+                stem, ext = os.path.splitext(safe_name)
+                counter = 2
+                while safe_name in used_persistent_names:
+                    safe_name = f"{stem}_{counter}{ext}"
+                    counter += 1
+
+            persistent_path = os.path.join(persistent_log_dir, safe_name)
+            try:
                 shutil.copy2(file_path, persistent_path)
-                all_log_txt_files_persistent.append((persistent_path, attach_info))
-                logging.debug(f"Copied: {base_name} -> {safe_name}")
+                used_persistent_names.add(safe_name)
+                all_log_txt_trace_csv_persistent.append((persistent_path, attach_info))
             except Exception as e:
-                logging.debug(f"❌ Failed to copy {base_name}: {e}")
-                # Keep original path as fallback
-                all_log_txt_files_persistent.append((file_path, attach_info))
-        else:
-            print(f"❌ File not found for copying: {file_path}")
+                logging.warning(
+                    "Failed to copy file to persistent_logs (source=%r, dest=%r): %s",
+                    file_path,
+                    persistent_path,
+                    e,
+                )
+                all_log_txt_trace_csv_persistent.append((file_path, attach_info))
 
-    # Use the persistent list instead
-    all_log_txt_files = all_log_txt_files_persistent   
-
-
-
-    ## Saving the all_log_txt_files to a temp workspace to pass it to log_file_analyzer.py dynamically
-
-    all_log_txt_files_data = []
-    for file_path, attach_info in all_log_txt_files:
-        all_log_txt_files_data.append({
-            'file_path': file_path,
-            'attach_info': attach_info
-        })
-
-    temp_file_path = os.path.join(workspace, 'all_log_txt_files.json')
-
-
+    # Save combined index — log_file_analyzer.py reads this via log_utils
+    json_path = os.path.join(workspace, 'all_log_txt_trace_csv_files.json')
     try:
-        with open(temp_file_path, 'w', encoding='utf-8') as f:
-            json.dump(all_log_txt_files_data, f, indent=2)
-        logging.debug(f"Saved all_log_txt_files data to {temp_file_path}")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(
+                [{'file_path': fp, 'attach_info': ai} for fp, ai in all_log_txt_trace_csv_persistent],
+                f, indent=2
+            )
     except Exception as e:
-        logging.debug(f"Failed to save all_log_txt_files data: {e}")
+        logging.error(f"Failed to save {json_path}: {e}")
 
-
-
+    # Split for downstream consumers
+    all_log_txt_trace_files_persistent = [
+        (p, a) for p, a in all_log_txt_trace_csv_persistent if not p.lower().endswith('.csv')
+    ]
+    all_csv_files_persistent = [
+        (p, a) for p, a in all_log_txt_trace_csv_persistent if p.lower().endswith('.csv')
+    ]
 
     logging.debug("PHASE 4: CALLING log_file_analyzer FOR .LOG, .TXT, AND .TRACE FILES")
 
@@ -539,8 +596,9 @@ if __name__ == "__main__":
 
     # Build new attachment structure
     attachment_info_structure = build_attachment_structure(
-        attachments, attachment_results, driver_versions_found, 
-        pipe_underrun_files, all_etl_files, all_log_txt_files
+        attachments, attachment_results, driver_versions_found,
+        pipe_underrun_files, all_etl_files, all_log_txt_trace_files_persistent,
+        all_csv_files=all_csv_files_persistent
     )
 
 
@@ -553,7 +611,8 @@ if __name__ == "__main__":
                 "etl_files": len(all_etl_files),
                 "log_files": len(all_log_files),
                 "txt_files": len(all_txt_files),
-                "trace_files": len(all_trace_files)
+                "trace_files": len(all_trace_files),
+                "csv_files": len(all_csv_files_persistent)
             }
         }
     }

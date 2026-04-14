@@ -40,7 +40,10 @@ const TRANSLATIONS = {
     noValidHsdId: "無有效HSD ID",
     importedHsdId: "已從網址匯入 HSD ID: {hsdId}",
     hsdAlreadyLocked: "本次 Session 已鎖定 HSD ID，請先清除對話",
-    reimportHsdConfirm: "重新匯入 HSD 將清除現有資料，是否要繼續？"
+    reimportHsdConfirm: "重新匯入 HSD 將清除現有資料，是否要繼續？",
+    realtimeFormatMode: "即時解析 HTML: {state}",
+    modeOn: "開",
+    modeOff: "關"
   },
   "en": {
     ready: "Ready",
@@ -83,7 +86,10 @@ const TRANSLATIONS = {
     noValidHsdId: "No valid HSD ID",
     importedHsdId: "Imported HSD ID from URL: {hsdId}",
     hsdAlreadyLocked: "Session HSD ID is already locked. Please clear chat first",
-    reimportHsdConfirm: "Re-importing HSD will clear current data. Continue?"
+    reimportHsdConfirm: "Re-importing HSD will clear current data. Continue?",
+    realtimeFormatMode: "Realtime HTML parsing: {state}",
+    modeOn: "On",
+    modeOff: "Off"
   }
 };
 
@@ -106,6 +112,7 @@ let chatGeneration = 0;
 let activeHsdId = null;
 let activeConversationId = null;
 let streamRenderState = null;
+let streamRealtimeFormatting = false;
 const STREAM_WAIT_FRAMES = ["▶", "▶▶", "▶▶▶"];
 
 function extractHsdId(text) {
@@ -244,7 +251,14 @@ function flushAssistantStream() {
   const chunk = state.pending;
   state.pending = "";
   state.fullText += chunk;
-  state.textNode.appendData(chunk);
+  if (streamRealtimeFormatting) {
+    renderAssistantMessage(state.el, state.fullText);
+    if (state.indicatorTimer != null && state.indicatorNode) {
+      state.el.appendChild(state.indicatorNode);
+    }
+  } else {
+    state.textNode.appendData(chunk);
+  }
   state.lastFlushAt = Date.now();
 
   const box = document.getElementById("messages");
@@ -315,6 +329,11 @@ function applyLanguage() {
   if (stopBtn) stopBtn.textContent = t("stop");
   const debugMenuBtn = document.getElementById("debugMenuBtn");
   if (debugMenuBtn) debugMenuBtn.textContent = t("debugConn");
+  const formatModeBtn = document.getElementById("formatModeBtn");
+  if (formatModeBtn) {
+    const modeText = streamRealtimeFormatting ? t("modeOn") : t("modeOff");
+    formatModeBtn.textContent = tFormat("realtimeFormatMode", { state: modeText });
+  }
   const importHsdBtn = document.getElementById("importHsdBtn");
   if (importHsdBtn) importHsdBtn.textContent = t("importHsdFromWebpage");
   const input = document.getElementById("messageInput");
@@ -1039,15 +1058,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     const messageInput = document.getElementById("messageInput");
     if (!messageInput) return;
 
-    let stored = { chatFontSize: 14 };
+    let stored = { chatFontSize: 14, streamRealtimeFormatting: false };
     try {
       if (typeof chrome !== "undefined" && chrome.storage?.local) {
-        stored = await chrome.storage.local.get({ chatFontSize: 14 });
+        stored = await chrome.storage.local.get({ chatFontSize: 14, streamRealtimeFormatting: false });
       }
     } catch (_) {
       // Fallback to defaults when storage API is temporarily unavailable.
     }
 
+    streamRealtimeFormatting = Boolean(stored.streamRealtimeFormatting);
     currentLanguage = "en";
     applyLanguage();
     applyFontSize(stored.chatFontSize);
@@ -1070,6 +1090,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     bindClick("debugMenuBtn", async () => {
       closeSettingsMenu();
       await debugConnection();
+    });
+    bindClick("formatModeBtn", async () => {
+      streamRealtimeFormatting = !streamRealtimeFormatting;
+      applyLanguage();
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        await chrome.storage.local.set({ streamRealtimeFormatting });
+      }
     });
     bindClick("clearBtn", clearChat);
     bindClick("sendBtn", sendMessage);
