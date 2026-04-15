@@ -1155,7 +1155,14 @@ async function restoreSession(entry) {
 // ───────────────────────────────────────────────────────────────────────────
 
 async function clearChat() {
-  await saveSessionToHistory();
+  // Remove current HSD from history on explicit clear
+  if (activeHsdId && typeof chrome !== "undefined" && chrome.storage?.local) {
+    try {
+      const stored = await chrome.storage.local.get({ hsdHistory: [] });
+      const filtered = (stored.hsdHistory || []).filter(e => e.hsdId !== activeHsdId);
+      await chrome.storage.local.set({ hsdHistory: filtered });
+    } catch (_) {}
+  }
   await cancelSending();
   cancelAssistantStreamRender();
   if (activeStreamPort) {
