@@ -632,18 +632,19 @@ def _run_dt_gnai_stream(prompt_text, on_delta, assistant=None, conversation_id=N
     pending = ""
     last_emit = time.time()
     last_pause_scan = 0.0
+    last_activity = time.time()
 
     while not (stdout_done and stderr_done):
-        if (time.time() - started) > TIMEOUT_SECONDS:
+        if (time.time() - last_activity) > TIMEOUT_SECONDS:
             try:
                 proc.kill()
             except Exception:
                 pass
             duration_ms = int((time.time() - started) * 1000)
-            _debug(f"dt stream timeout after {TIMEOUT_SECONDS}s")
+            _debug(f"dt stream inactivity timeout after {TIMEOUT_SECONDS}s")
             return {
                 "ok": False,
-                "error": f"dt gnai ask timeout after {TIMEOUT_SECONDS}s",
+                "error": f"dt gnai ask inactivity timeout after {TIMEOUT_SECONDS}s (no new data)",
                 "status": 504,
                 "stdout": _trim_text("".join(stdout_parts)),
                 "stderr": _trim_text("".join(stderr_parts)),
@@ -666,6 +667,7 @@ def _run_dt_gnai_stream(prompt_text, on_delta, assistant=None, conversation_id=N
             stdout_parts.append(data)
             pending += data
             now = time.time()
+            last_activity = now
 
             # Prefer line-level emission; otherwise flush by time budget.
             newline_idx = pending.rfind("\n")

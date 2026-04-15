@@ -1,4 +1,4 @@
-// background.js - GNAI AssisChatter service worker (bridge mode)
+// background.js - SightingAssistant_Chatter service worker (bridge mode)
 
 chrome.action.onClicked.addListener((tab) => {
   chrome.sidePanel.open({ windowId: tab.windowId });

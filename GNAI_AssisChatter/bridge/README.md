@@ -1,4 +1,4 @@
-# GNAI AssisChatter Bridge (Python)
+# SightingAssistant_Chatter Bridge (Python)
 
 這個 bridge 讓 Chrome extension 可以透過 localhost 呼叫 `dt gnai ask --assistant ...`。
 
@@ -43,7 +43,7 @@ python .\bridge_server.py
 - `GNAI_BRIDGE_API_KEY` (可選，設定後需 Bearer token)
 - `GNAI_BRIDGE_DT_PATH` (可選，若 PATH 找不到 dt，填入 dt.exe 絕對路徑)
 
-## 4. Extension 端模式（GNAI AssisChatter）
+## 4. Extension 端模式（SightingAssistant_Chatter）
 
 Extension 已是純 bridge 模式，固定呼叫:
 

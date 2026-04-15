@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "GNAI AssisChatter",
+  "name": "SightingAssistant_Chatter",
   "version": "1.0.0",
   "description": "Chat with webpage content via GNAI-compatible endpoint.",
   "permissions": [
@@ -15,7 +15,7 @@
     "<all_urls>"
   ],
   "action": {
-    "default_title": "GNAI AssisChatter"
+    "default_title": "SightingAssistant_Chatter"
   },
   "side_panel": {
     "default_path": "sidepanel.html"

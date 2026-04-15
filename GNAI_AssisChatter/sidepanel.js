@@ -98,6 +98,7 @@ const FONT_SIZE_MAX = 20;
 const FONT_STEP = 1;
 const STREAM_UI_UPDATE_MIN_INTERVAL_MS = 500;
 const HSD_ID_LENGTH = 11;
+const MAX_HISTORY = 5;
 const QUICK_PUNCHLINE_TEMPLATE = "Please give me a punchline summary of HSD {ID} and skip attachment check";
 
 let currentLanguage = "en";
@@ -110,6 +111,7 @@ let isSending = false;
 let activeStreamPort = null;
 let chatGeneration = 0;
 let activeHsdId = null;
+let activeHsdTitle = null;
 let activeConversationId = null;
 let streamRenderState = null;
 let streamRealtimeFormatting = false;
@@ -471,6 +473,7 @@ function lockSessionHsdId(hsdId, options = {}) {
   }
 
   activeHsdId = id;
+  activeHsdTitle = options.hsdTitle || null;
   activeConversationId = `${activeHsdId}-${Date.now()}`;
   const input = document.getElementById("messageInput");
   if (input) {
@@ -512,6 +515,7 @@ async function importHsdIdFromWebpage() {
       const shouldContinue = window.confirm(t("reimportHsdConfirm"));
       if (!shouldContinue) return;
 
+      await saveSessionToHistory();
       chatGeneration += 1;
       await cancelSending();
       cancelAssistantStreamRender();
@@ -543,7 +547,10 @@ async function importHsdIdFromWebpage() {
       return;
     }
 
-    lockSessionHsdId(hsdId, { importedFromUrl: true });
+    const rawTitle = String(tab?.title || "").trim();
+    const bracketIdx = rawTitle.lastIndexOf("]");
+    const tabTitle = bracketIdx >= 0 ? rawTitle.slice(bracketIdx + 1).trim() : rawTitle;
+    lockSessionHsdId(hsdId, { importedFromUrl: true, hsdTitle: tabTitle || null });
   } catch (_) {
     addSystemMessage(t("noValidHsdId"));
     setStatus("error", t("noValidHsdId"));
@@ -786,6 +793,7 @@ async function loadPage() {
       throw new Error(response?.error || t("loadFailed"));
     }
 
+    await saveSessionToHistory();
     messages = [];
     pageContent = response.content;
     clearMessageContainer();
@@ -805,6 +813,7 @@ async function loadClipboard() {
       throw new Error("Clipboard is empty");
     }
 
+    await saveSessionToHistory();
     messages = [];
     pageContent = {
       title: "Clipboard Content",
@@ -993,6 +1002,7 @@ async function sendMessage() {
     if (thisGeneration === chatGeneration) {
       messages.push({ role: "user", content: question });
       messages.push({ role: "assistant", content: response.result });
+      saveSessionToHistory();
     }
     if (response?.partial) {
       addSystemMessage(t("streamPartialNotice"));
@@ -1028,8 +1038,145 @@ async function sendMessage() {
   }
 }
 
-async function clearChat() {
+// ── History ────────────────────────────────────────────────────────────────
+async function saveSessionToHistory() {
+  if (!activeHsdId || messages.length === 0) return;
+  try {
+    let stored = { hsdHistory: [] };
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      stored = await chrome.storage.local.get({ hsdHistory: [] });
+    }
+    const history = Array.isArray(stored.hsdHistory) ? stored.hsdHistory : [];
+    const filtered = history.filter(e => e.hsdId !== activeHsdId);
+    filtered.unshift({
+      hsdId: activeHsdId,
+      hsdTitle: activeHsdTitle || "",
+      conversationId: activeConversationId || "",
+      messages: [...messages],
+      timestamp: Date.now()
+    });
+    const trimmed = filtered.slice(0, MAX_HISTORY);
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      await chrome.storage.local.set({ hsdHistory: trimmed });
+    }
+  } catch (_) {}
+}
+
+function closeHistoryMenu() {
+  const menu = document.getElementById("historyMenu");
+  if (menu) menu.classList.remove("show");
+}
+
+async function openHistoryMenu() {
+  const menu = document.getElementById("historyMenu");
+  if (!menu) return;
+
+  if (menu.classList.contains("show")) {
+    menu.classList.remove("show");
+    return;
+  }
+
+  let stored = { hsdHistory: [] };
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      stored = await chrome.storage.local.get({ hsdHistory: [] });
+    }
+  } catch (_) {}
+
+  const history = Array.isArray(stored.hsdHistory) ? stored.hsdHistory : [];
+  menu.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.className = "history-menu-title";
+  title.textContent = "Recent Sessions";
+  menu.appendChild(title);
+
+  if (history.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "history-empty";
+    empty.textContent = "No history yet";
+    menu.appendChild(empty);
+  } else {
+    for (const entry of history) {
+      const btn = document.createElement("button");
+      btn.className = "history-item";
+
+      const hsdLine = document.createElement("div");
+      hsdLine.className = "history-item-hsd";
+      hsdLine.textContent = `HSD ${entry.hsdId}`;
+
+      btn.appendChild(hsdLine);
+      if (entry.hsdTitle) {
+        const titleLine = document.createElement("div");
+        titleLine.className = "history-item-cid";
+        titleLine.textContent = entry.hsdTitle;
+        btn.appendChild(titleLine);
+      }
+      btn.addEventListener("click", () => {
+        closeHistoryMenu();
+        restoreSession(entry);
+      });
+      menu.appendChild(btn);
+    }
+  }
+
+  const clearAllBtn = document.createElement("button");
+  clearAllBtn.className = "history-clear-btn";
+  clearAllBtn.textContent = "Clear All History";
+  clearAllBtn.addEventListener("click", async () => {
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      await chrome.storage.local.set({ hsdHistory: [] });
+    }
+    closeHistoryMenu();
+  });
+  menu.appendChild(clearAllBtn);
+
+  menu.classList.add("show");
+}
+
+async function restoreSession(entry) {
+  if (!entry?.hsdId) return;
+
+  await saveSessionToHistory();
+
   chatGeneration += 1;
+  await cancelSending();
+  cancelAssistantStreamRender();
+  if (activeStreamPort) {
+    try { activeStreamPort.disconnect(); } catch (_) {}
+    activeStreamPort = null;
+  }
+
+  messages = [];
+  pageContent = null;
+  activeHsdId = null;
+  activeConversationId = null;
+
+  const box = document.getElementById("messages");
+  box.innerHTML = "";
+  hidePageInfo();
+
+  activeHsdId = entry.hsdId;
+  activeHsdTitle = entry.hsdTitle || null;
+  activeConversationId = entry.conversationId || `${entry.hsdId}-${Date.now()}`;
+  messages = Array.isArray(entry.messages) ? [...entry.messages] : [];
+
+  for (const msg of messages) {
+    addMessage(msg.role, msg.content);
+  }
+  if (messages.length === 0) clearMessageContainer();
+
+  renderQuickActions();
+  renderSessionHsdLabel();
+  renderStatusConversationId();
+  setHsdInputMode();
+  addSystemMessage(`Restored session: HSD ${activeHsdId} (${messages.length} messages)`);
+  setStatus("ready", t("ready"));
+}
+// ───────────────────────────────────────────────────────────────────────────
+
+async function clearChat() {
+  await saveSessionToHistory();
   await cancelSending();
   cancelAssistantStreamRender();
   if (activeStreamPort) {
@@ -1043,6 +1190,7 @@ async function clearChat() {
   messages = [];
   pageContent = null;
   activeHsdId = null;
+  activeHsdTitle = null;
   activeConversationId = null;
   renderQuickActions();
   renderSessionHsdLabel();
@@ -1099,6 +1247,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     });
     bindClick("clearBtn", clearChat);
+    bindClick("historyBtn", (e) => {
+      e.stopPropagation();
+      openHistoryMenu();
+    });
     bindClick("sendBtn", sendMessage);
     bindClick("stopBtn", cancelSending);
     bindClick("quickPunchlineBtn", () => {
@@ -1156,15 +1308,29 @@ document.addEventListener("DOMContentLoaded", async () => {
     promptForHsdId();
     window.addEventListener("resize", updateHeaderLayoutForOverlap);
     document.addEventListener("click", (event) => {
-      const wrap = document.querySelector(".settings-wrap");
-      if (!wrap) return;
-      if (!wrap.contains(event.target)) {
+      const settingsWrap = document.querySelector(".settings-wrap");
+      if (!settingsWrap || !settingsWrap.contains(event.target)) {
         closeSettingsMenu();
+      }
+      const historyWrap = document.querySelector(".history-wrap");
+      if (!historyWrap || !historyWrap.contains(event.target)) {
+        closeHistoryMenu();
       }
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeSettingsMenu();
+      if (event.key === "Escape") { closeSettingsMenu(); closeHistoryMenu(); }
     });
+
+    // Save session when side panel is hidden or browser/extension is closed
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        saveSessionToHistory();
+      }
+    });
+    window.addEventListener("pagehide", () => {
+      saveSessionToHistory();
+    });
+
     messageInput.focus();
   } catch (err) {
     const msg = err?.message || String(err);

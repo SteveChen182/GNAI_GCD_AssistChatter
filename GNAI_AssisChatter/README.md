@@ -1,8 +1,8 @@
-# GNAI AssisChatter
+# SightingAssistant_Chatter
 
 > A Chrome Extension that brings Intel GNAI-powered GPU sighting analysis directly into your browser's side panel.
 
-GNAI AssisChatter connects your Chrome browser to Intel's internal GNAI platform via a local Python bridge. It lets GPU debug engineers analyze Hardware Sighting Documents (HSD) without leaving their browser — just enter an HSD ID and get a structured AI-generated analysis report streamed back in real time.
+SightingAssistant_Chatter connects your Chrome browser to Intel's internal GNAI platform via a local Python bridge. It lets GPU debug engineers analyze Hardware Sighting Documents (HSD) without leaving their browser — just enter an HSD ID and get a structured AI-generated analysis report streamed back in real time.
 
 ---
 
@@ -100,7 +100,7 @@ This registers `com.gnai.bridge_launcher` so Chrome can auto-start the bridge.
 
 ### Step 4 — Reload the extension
 
-In `chrome://extensions`, click **Reload** for GNAI AssisChatter (or restart Chrome).
+In `chrome://extensions`, click **Reload** for SightingAssistant_Chatter (or restart Chrome).
 
 ### Step 5 — Validate
 
@@ -120,7 +120,7 @@ Then click **Debug Connection** again — it should show `🟢 Ready`.
 ## Usage
 
 1. Navigate to an HSD page (`hsdes.intel.com/...`) or any relevant webpage
-2. Open the GNAI AssisChatter side panel
+2. Open the SightingAssistant_Chatter side panel
 3. Click **Import HSD** to auto-detect the HSD ID from the URL, or type it manually
 4. Press **Send** — the assistant will run the full sighting analysis pipeline
 5. Ask follow-up questions in the same session

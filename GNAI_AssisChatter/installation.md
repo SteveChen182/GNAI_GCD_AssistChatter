@@ -1,4 +1,4 @@
-# GNAI AssisChatter Installation (Quick 5 Steps)
+# SightingAssistant_Chatter Installation (Quick 5 Steps)
 
 ## 1. Verify dt CLI
 Open PowerShell and run:
