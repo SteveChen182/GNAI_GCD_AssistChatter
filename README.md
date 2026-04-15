@@ -1,4 +1,4 @@
-# GNAI AssisChatter
+# GNAI AssistChatter
 
 > A Chrome Extension that brings Intel GNAI-powered GPU sighting analysis directly into your browser's side panel.
 
