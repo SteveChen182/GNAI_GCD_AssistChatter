@@ -395,30 +395,9 @@ function renderSessionHsdLabel() {
 
 function updateHeaderLayoutForOverlap() {
   const header = document.getElementById("headerBar");
-  const label = document.getElementById("sessionHsdLabel");
-  const controls = document.getElementById("headerControls");
-  const title = header?.querySelector(".header-title");
-  if (!header || !label || !controls || !title) return;
-
-  if (!(label.textContent || "").trim()) {
-    header.classList.remove("stack-controls");
-    return;
-  }
-
-  // Measure with single-row layout first, then stack controls only when needed.
+  if (!header) return;
+  // Title is hidden; no overlap check needed — always single-row layout.
   header.classList.remove("stack-controls");
-
-  const titleRect = title.getBoundingClientRect();
-  const labelRect = label.getBoundingClientRect();
-  const controlsRect = controls.getBoundingClientRect();
-  const spacing = 8;
-
-  const overlapTitle = labelRect.left < (titleRect.right + spacing);
-  const overlapControls = labelRect.right > (controlsRect.left - spacing);
-
-  if (overlapTitle || overlapControls) {
-    header.classList.add("stack-controls");
-  }
 }
 
 function removeEnterHsdPromptMessage() {
