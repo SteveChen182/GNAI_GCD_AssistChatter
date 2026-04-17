@@ -33,7 +33,10 @@ if (Test-Path $toolkitSrc) {
     }
     Write-Host "[bridge] toolkit sync done"
 } else {
-    Write-Warning "[bridge] toolkit source not found: $toolkitSrc (skipping sync)"
+    Write-Warning "[bridge] toolkit source not found: $toolkitSrc"
+    Write-Warning "[bridge] Please do a fresh git clone (git pull may not work for first-time setup):"
+    Write-Warning "[bridge]   git clone https://github.com/SteveChen182/GNAI_GCD_AssistChatter.git"
+    Write-Warning "[bridge] Skipping toolkit sync - dt may fail if C:\dt_sighting does not exist."
 }
 
 # -- Ensure ~/.gnai/config.yaml points sighting toolkit to C:\dt_sighting ---
@@ -58,7 +61,8 @@ if (Test-Path $gnaiConfig) {
         }
     }
     if ($changed) {
-        $newLines | Set-Content $gnaiConfig -Encoding UTF8
+        $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllLines($gnaiConfig, $newLines, $utf8NoBom)
         Write-Host "[bridge] config.yaml updated"
     } else {
         Write-Host "[bridge] config.yaml sighting path OK"
