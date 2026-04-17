@@ -1,4 +1,4 @@
-# ── Kill any existing bridge on port 8775 ────────────────────────────────────
+# -- Kill any existing bridge on port 8775 ----------------------------------
 $existingPid = (netstat -ano | Select-String ":8775\s.*LISTENING") -replace ".*\s(\d+)$", '$1' | Select-Object -First 1
 if ($existingPid) {
     $proc = Get-Process -Id ([int]$existingPid) -ErrorAction SilentlyContinue
@@ -9,14 +9,14 @@ if ($existingPid) {
         Start-Sleep -Milliseconds 500
         Write-Host "[bridge] old bridge stopped"
     } else {
-        Write-Warning "[bridge] port 8775 is in use by another process (PID $existingPid, '$($proc.Name)') — not killing it. Please free the port manually."
+        Write-Warning "[bridge] port 8775 is in use by another process (PID $existingPid, '$($proc.Name)') - not killing it. Please free the port manually."
         exit 1
     }
 }
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-# ── Sync toolkit to C:\dt_sighting (no-spaces path required by dt gnai) ──────
-# $PSScriptRoot = .../GNAI_AssisChatter/bridge  →  two levels up = repo root
+# -- Sync toolkit to C:\dt_sighting (no-spaces path required by dt gnai) -----
+# $PSScriptRoot = .../GNAI_AssisChatter/bridge  ???  two levels up = repo root
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $toolkitSrc = Join-Path $repoRoot "SightingAssistantTool_latest"
 $toolkitDst = "C:\dt_sighting"
@@ -36,7 +36,7 @@ if (Test-Path $toolkitSrc) {
     Write-Warning "[bridge] toolkit source not found: $toolkitSrc (skipping sync)"
 }
 
-# ── Ensure ~/.gnai/config.yaml points sighting toolkit to C:\dt_sighting ────
+# -- Ensure ~/.gnai/config.yaml points sighting toolkit to C:\dt_sighting ---
 $gnaiConfig = "$env:USERPROFILE\.gnai\config.yaml"
 if (Test-Path $gnaiConfig) {
     $lines = Get-Content $gnaiConfig
@@ -66,7 +66,7 @@ if (Test-Path $gnaiConfig) {
 } else {
     Write-Warning "[bridge] ~/.gnai/config.yaml not found -- skipping path check"
 }
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 $env:GNAI_BRIDGE_HOST = "127.0.0.1"
 $env:GNAI_BRIDGE_PORT = "8775"
