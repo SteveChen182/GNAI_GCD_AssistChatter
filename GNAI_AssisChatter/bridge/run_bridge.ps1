@@ -49,8 +49,8 @@ if (Test-Path $gnaiConfig) {
         } elseif ($line -match "^\s*-\s*name:") {
             $inSighting = $false
         }
-        if ($inSighting -and $line -match "^\s*path:" -and $line -notmatch "C:\\dt_sighting") {
-            $newLines.Add('    path: "C:\dt_sighting"')
+        if ($inSighting -and $line -match "^\s*path:" -and $line -notmatch "C:\\\\dt_sighting|C:/dt_sighting") {
+            $newLines.Add('    path: "C:\\dt_sighting"')
             Write-Host "[bridge] config.yaml: updating sighting path -> C:\dt_sighting"
             $changed = $true
         } else {
