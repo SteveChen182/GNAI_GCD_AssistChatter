@@ -1,5 +1,24 @@
+# ── Kill any existing bridge on port 8775 ────────────────────────────────────
+$existingPid = (netstat -ano | Select-String ":8775\s.*LISTENING") -replace ".*\s(\d+)$", '$1' | Select-Object -First 1
+if ($existingPid) {
+    $proc = Get-Process -Id ([int]$existingPid) -ErrorAction SilentlyContinue
+    $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$existingPid" -ErrorAction SilentlyContinue).CommandLine
+    if ($proc -and $proc.Name -match "python" -and $cmdLine -match "bridge_server") {
+        Write-Host "[bridge] found existing bridge_server (PID $existingPid), stopping it..."
+        Stop-Process -Id ([int]$existingPid) -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+        Write-Host "[bridge] old bridge stopped"
+    } else {
+        Write-Warning "[bridge] port 8775 is in use by another process (PID $existingPid, '$($proc.Name)') — not killing it. Please free the port manually."
+        exit 1
+    }
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── Sync toolkit to C:\dt_sighting (no-spaces path required by dt gnai) ──────
-$toolkitSrc = "C:\Users\steveche\OneDrive - Intel Corporation\Documents\Python_Project\GCD_SightingAssistantTool\SightingAssistantTool_latest"
+# $PSScriptRoot = .../GNAI_AssisChatter/bridge  →  two levels up = repo root
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$toolkitSrc = Join-Path $repoRoot "SightingAssistantTool_latest"
 $toolkitDst = "C:\dt_sighting"
 if (Test-Path $toolkitSrc) {
     Write-Host "[bridge] syncing toolkit $toolkitSrc -> $toolkitDst"
@@ -15,6 +34,35 @@ if (Test-Path $toolkitSrc) {
     Write-Host "[bridge] toolkit sync done"
 } else {
     Write-Warning "[bridge] toolkit source not found: $toolkitSrc (skipping sync)"
+}
+
+# ── Ensure ~/.gnai/config.yaml points sighting toolkit to C:\dt_sighting ────
+$gnaiConfig = "$env:USERPROFILE\.gnai\config.yaml"
+if (Test-Path $gnaiConfig) {
+    $lines = Get-Content $gnaiConfig
+    $inSighting = $false
+    $changed = $false
+    $newLines = for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -match "^\s*-\s*name:\s*sighting\s*$") { $inSighting = $true }
+        elseif ($line -match "^\s*-\s*name:") { $inSighting = $false }
+        if ($inSighting -and $line -match "^\s*path:" -and $line -notmatch "C:\\dt_sighting") {
+            $newLine = $line -replace "path:.*", 'path: "C:\\dt_sighting"'
+            Write-Host "[bridge] config.yaml: updating sighting path -> C:\dt_sighting"
+            $changed = $true
+            $newLine
+        } else {
+            $line
+        }
+    }
+    if ($changed) {
+        $newLines | Set-Content $gnaiConfig -Encoding UTF8
+        Write-Host "[bridge] config.yaml updated"
+    } else {
+        Write-Host "[bridge] config.yaml sighting path OK"
+    }
+} else {
+    Write-Warning "[bridge] ~/.gnai/config.yaml not found — skipping path check"
 }
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -33,7 +81,7 @@ $env:GNAI_BRIDGE_STREAM_READ_CHARS = "1024"
 # Optional: manually set full dt.exe path if needed.
 # Example:
 # $manualDtPath = "C:\Tools\dt\dt.exe"
-$manualDtPath = "C:\Users\steveche\bin\dt.exe"
+$manualDtPath = ""  # Leave empty to auto-detect from PATH
 
 if ($manualDtPath -and (Test-Path $manualDtPath)) {
 	$env:GNAI_BRIDGE_DT_PATH = $manualDtPath
