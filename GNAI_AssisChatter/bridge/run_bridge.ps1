@@ -42,17 +42,19 @@ if (Test-Path $gnaiConfig) {
     $lines = Get-Content $gnaiConfig
     $inSighting = $false
     $changed = $false
-    $newLines = for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        if ($line -match "^\s*-\s*name:\s*sighting\s*$") { $inSighting = $true }
-        elseif ($line -match "^\s*-\s*name:") { $inSighting = $false }
+    $newLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $lines) {
+        if ($line -match "^\s*-\s*name:\s*sighting\s*$") {
+            $inSighting = $true
+        } elseif ($line -match "^\s*-\s*name:") {
+            $inSighting = $false
+        }
         if ($inSighting -and $line -match "^\s*path:" -and $line -notmatch "C:\\dt_sighting") {
-            $newLine = $line -replace "path:.*", 'path: "C:\\dt_sighting"'
+            $newLines.Add('    path: "C:\dt_sighting"')
             Write-Host "[bridge] config.yaml: updating sighting path -> C:\dt_sighting"
             $changed = $true
-            $newLine
         } else {
-            $line
+            $newLines.Add($line)
         }
     }
     if ($changed) {
@@ -62,7 +64,7 @@ if (Test-Path $gnaiConfig) {
         Write-Host "[bridge] config.yaml sighting path OK"
     }
 } else {
-    Write-Warning "[bridge] ~/.gnai/config.yaml not found — skipping path check"
+    Write-Warning "[bridge] ~/.gnai/config.yaml not found -- skipping path check"
 }
 # ─────────────────────────────────────────────────────────────────────────────
 
