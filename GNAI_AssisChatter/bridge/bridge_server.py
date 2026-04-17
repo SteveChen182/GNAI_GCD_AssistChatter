@@ -368,8 +368,9 @@ def _normalize_conversation_id(value):
     return normalized[:80]
 
 
-def _build_dt_command(dt_command, prompt_text, assistant=None, conversation_id=None):
-    cmd = [dt_command, "gnai", "ask", prompt_text]
+def _build_dt_command(dt_command, prompt_text, assistant=None, conversation_id=None, gnai_mode="ask"):
+    mode = gnai_mode if gnai_mode in ("ask", "chat") else "ask"
+    cmd = [dt_command, "gnai", mode, prompt_text]
     # Per session policy: only pass conversation id, never force assistant from bridge.
     if conversation_id:
         cmd.extend(["--conversation-id", str(conversation_id)])
@@ -440,7 +441,7 @@ def _build_dt_popen_kwargs():
     return kwargs
 
 
-def _run_dt_gnai(prompt_text, assistant=None, conversation_id=None):
+def _run_dt_gnai(prompt_text, assistant=None, conversation_id=None, gnai_mode="ask"):
     dt_command, dt_source = _resolve_dt_command()
     if not dt_command:
         return {
@@ -458,6 +459,7 @@ def _run_dt_gnai(prompt_text, assistant=None, conversation_id=None):
         prompt_text,
         assistant=assistant,
         conversation_id=conversation_id,
+        gnai_mode=gnai_mode,
     )
     has_assistant_flag = "--assistant" in cmd
 
@@ -466,10 +468,7 @@ def _run_dt_gnai(prompt_text, assistant=None, conversation_id=None):
         f"dt_source={dt_source} assistant_flag={has_assistant_flag} "
         f"conversation_id={conversation_id or '-'} prompt='{_short(prompt_text)}'"
     )
-
-    started = time.time()
-    try:
-        proc = subprocess.Popen(cmd, **_build_dt_popen_kwargs())
+    _debug(f"dt cmd: {' '.join(cmd)}")
 
         stdout_text = ""
         stderr_text = ""
@@ -558,7 +557,7 @@ def _run_dt_gnai(prompt_text, assistant=None, conversation_id=None):
     }
 
 
-def _run_dt_gnai_stream(prompt_text, on_delta, assistant=None, conversation_id=None):
+def _run_dt_gnai_stream(prompt_text, on_delta, assistant=None, conversation_id=None, gnai_mode="ask"):
     dt_command, dt_source = _resolve_dt_command()
     if not dt_command:
         return {
@@ -576,6 +575,7 @@ def _run_dt_gnai_stream(prompt_text, on_delta, assistant=None, conversation_id=N
         prompt_text,
         assistant=assistant,
         conversation_id=conversation_id,
+        gnai_mode=gnai_mode,
     )
     has_assistant_flag = "--assistant" in cmd
 
@@ -584,9 +584,7 @@ def _run_dt_gnai_stream(prompt_text, on_delta, assistant=None, conversation_id=N
         f"dt_source={dt_source} assistant_flag={has_assistant_flag} "
         f"conversation_id={conversation_id or '-'} prompt='{_short(prompt_text)}'"
     )
-
-    started = time.time()
-    q = queue.Queue()
+    _debug(f"dt stream cmd: {' '.join(cmd)}")
     stdout_parts = []
     stderr_parts = []
 
@@ -922,6 +920,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         conversation_id = _normalize_conversation_id(
             payload.get("conversation_id") or payload.get("conversationId")
         )
+        gnai_mode = str(payload.get("gnai_mode", "ask")).strip().lower()
+        if gnai_mode not in ("ask", "chat"):
+            gnai_mode = "ask"
 
         prompt = _get_last_user_message(payload.get("messages"))
         if not prompt:
@@ -995,6 +996,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     _on_delta,
                     assistant=None if direct_dt_mode else assistant,
                     conversation_id=conversation_id,
+                    gnai_mode=gnai_mode,
                 )
                 if not stream_result.get("ok"):
                     _stream_json_line(
@@ -1039,6 +1041,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 prompt,
                 assistant=None,
                 conversation_id=conversation_id,
+                gnai_mode=gnai_mode,
             )
             result.setdefault("followup_rounds", 0)
         else:

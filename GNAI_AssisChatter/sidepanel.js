@@ -113,6 +113,16 @@ let chatGeneration = 0;
 let activeHsdId = null;
 let activeHsdTitle = null;
 let activeConversationId = null;
+let firstResponseDone = false;
+let gnaiMode = "ask"; // "ask" | "chat"
+
+// ── Quick action buttons shown after first AI response ──────────────────────
+const QUICK_ACTIONS = [
+  { label: "最新狀況",           prompt: (id) => `請說明 HSD ${id} 目前的最新狀況，包含問題描述與進度。` },
+  { label: "測試環境",           prompt: (id) => `請描述 HSD ${id} 的測試環境，包含硬體、OS、驅動版本等資訊。` },
+  { label: "最新的 action request", prompt: (id) => `請列出 HSD ${id} 目前最新的 action request 是什麼。` },
+  { label: "下一步建議",         prompt: (id) => `根據 HSD ${id} 的現況，請建議下一步的行動方向。` },
+];
 let streamRenderState = null;
 let streamRealtimeFormatting = false;
 const STREAM_WAIT_FRAMES = ["▶", "▶▶", "▶▶▶"];
@@ -511,6 +521,7 @@ async function importHsdIdFromWebpage() {
       pageContent = null;
       activeHsdId = null;
       activeConversationId = null;
+      firstResponseDone = false;
       renderQuickActions();
       renderSessionHsdLabel();
       hidePageInfo();
@@ -538,18 +549,54 @@ async function importHsdIdFromWebpage() {
 
 function renderQuickActions() {
   const wrapper = document.getElementById("quickActions");
-  const button = document.getElementById("quickPunchlineBtn");
-  if (!wrapper || !button) return;
+  if (!wrapper) return;
 
   if (!activeHsdId) {
     wrapper.classList.remove("show");
-    button.textContent = "";
-    button.disabled = true;
+    wrapper.innerHTML = "";
     return;
   }
 
-  button.textContent = buildPunchlinePrompt(activeHsdId);
-  button.disabled = isSending;
+  wrapper.innerHTML = "";
+
+  if (!firstResponseDone) {
+    // Before first response: show single punchline button
+    const btn = document.createElement("button");
+    btn.className = "quick-btn";
+    btn.style.flex = "0 0 auto";
+    btn.style.maxWidth = "100%";
+    btn.textContent = buildPunchlinePrompt(activeHsdId);
+    btn.disabled = isSending;
+    btn.addEventListener("click", () => {
+      if (!activeHsdId || isSending) return;
+      const inputEl = document.getElementById("messageInput");
+      if (!inputEl) return;
+      inputEl.value = buildPunchlinePrompt(activeHsdId);
+      inputEl.style.height = "auto";
+      inputEl.style.height = `${inputEl.scrollHeight}px`;
+      sendMessage();
+    });
+    wrapper.appendChild(btn);
+  } else {
+    // After first response: show 4 quick action buttons
+    for (const action of QUICK_ACTIONS) {
+      const btn = document.createElement("button");
+      btn.className = "quick-btn";
+      btn.textContent = action.label;
+      btn.disabled = isSending;
+      btn.addEventListener("click", () => {
+        if (!activeHsdId || isSending) return;
+        const inputEl = document.getElementById("messageInput");
+        if (!inputEl) return;
+        inputEl.value = action.prompt(activeHsdId);
+        inputEl.style.height = "auto";
+        inputEl.style.height = `${inputEl.scrollHeight}px`;
+        sendMessage();
+      });
+      wrapper.appendChild(btn);
+    }
+  }
+
   wrapper.classList.add("show");
 }
 
@@ -717,6 +764,7 @@ function startSendingState() {
 
 function endSendingState() {
   isSending = false;
+  firstResponseDone = true;
   stopSendingTicker();
   const sendBtn = document.getElementById("sendBtn");
   const stopBtn = document.getElementById("stopBtn");
@@ -926,7 +974,8 @@ async function sendMessage() {
         type: "CHAT_STREAM",
         messages: apiMessages,
         language: "en",
-        conversationId
+        conversationId,
+        gnaiMode
       });
     });
 
@@ -938,7 +987,8 @@ async function sendMessage() {
             type: "CHAT",
             messages: apiMessages,
             language: "en",
-            conversationId: getHsdConversationId()
+            conversationId: getHsdConversationId(),
+            gnaiMode
           },
           resolve
         );
@@ -1139,6 +1189,7 @@ async function restoreSession(entry) {
   activeHsdTitle = entry.hsdTitle || null;
   activeConversationId = entry.conversationId || `${entry.hsdId}-${Date.now()}`;
   messages = Array.isArray(entry.messages) ? [...entry.messages] : [];
+  firstResponseDone = messages.some(m => m.role === "assistant");
 
   for (const msg of messages) {
     addMessage(msg.role, msg.content);
@@ -1178,6 +1229,7 @@ async function clearChat() {
   activeHsdId = null;
   activeHsdTitle = null;
   activeConversationId = null;
+  firstResponseDone = false;
   renderQuickActions();
   renderSessionHsdLabel();
   renderStatusConversationId();
@@ -1217,6 +1269,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       e.stopPropagation();
       toggleSettingsMenu();
     });
+    bindClick("gnaiModeBtn", () => {
+      gnaiMode = gnaiMode === "ask" ? "chat" : "ask";
+      const btn = document.getElementById("gnaiModeBtn");
+      if (btn) {
+        btn.textContent = gnaiMode === "ask" ? "Ask" : "Chat";
+        btn.classList.toggle("mode-chat", gnaiMode === "chat");
+      }
+    });
     bindClick("importHsdBtn", async () => {
       closeSettingsMenu();
       await importHsdIdFromWebpage();
@@ -1239,16 +1299,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     bindClick("sendBtn", sendMessage);
     bindClick("stopBtn", cancelSending);
-    bindClick("quickPunchlineBtn", () => {
-      if (!activeHsdId || isSending) return;
-      const inputEl = document.getElementById("messageInput");
-      if (!inputEl) return;
-      inputEl.value = buildPunchlinePrompt(activeHsdId);
-      inputEl.style.height = "auto";
-      inputEl.style.height = `${inputEl.scrollHeight}px`;
-      sendMessage();
-    });
-
     bindClick("fontIncBtn", async () => {
       applyFontSize(currentFontSize + FONT_STEP);
       if (typeof chrome !== "undefined" && chrome.storage?.local) {
