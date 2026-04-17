@@ -16,7 +16,7 @@ if ($existingPid) {
 # -----------------------------------------------------------------------------
 
 # -- Sync toolkit to C:\dt_sighting (no-spaces path required by dt gnai) -----
-# $PSScriptRoot = .../GNAI_AssisChatter/bridge  ???  two levels up = repo root
+# $PSScriptRoot = .../GNAI_AssisChatter/bridge -> two levels up = repo root
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $toolkitSrc = Join-Path $repoRoot "SightingAssistantTool_latest"
 $toolkitDst = "C:\dt_sighting"
@@ -49,7 +49,7 @@ if (Test-Path $gnaiConfig) {
         } elseif ($line -match "^\s*-\s*name:") {
             $inSighting = $false
         }
-        if ($inSighting -and $line -match "^\s*path:" -and $line -notmatch "C:\\\\dt_sighting|C:/dt_sighting") {
+        if ($inSighting -and $line -match "^\s*path:" -and $line -notmatch "dt_sighting") {
             $newLines.Add('    path: "C:\\dt_sighting"')
             Write-Host "[bridge] config.yaml: updating sighting path -> C:\dt_sighting"
             $changed = $true
