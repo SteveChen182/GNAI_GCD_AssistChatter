@@ -588,6 +588,8 @@ def _run_dt_gnai_stream(prompt_text, on_delta, assistant=None, conversation_id=N
         f"conversation_id={conversation_id or '-'} prompt='{_short(prompt_text)}'"
     )
     _debug(f"dt stream cmd: {' '.join(cmd)}")
+    q = queue.Queue()
+    started = time.time()
     stdout_parts = []
     stderr_parts = []
 
