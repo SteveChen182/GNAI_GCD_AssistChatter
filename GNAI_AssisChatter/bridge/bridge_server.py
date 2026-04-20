@@ -370,7 +370,11 @@ def _normalize_conversation_id(value):
 
 def _build_dt_command(dt_command, prompt_text, assistant=None, conversation_id=None, gnai_mode="ask"):
     mode = gnai_mode if gnai_mode in ("ask", "chat") else "ask"
-    cmd = [dt_command, "gnai", mode, prompt_text]
+    if mode == "chat":
+        # gnai chat requires --prompt flag; positional arg not supported
+        cmd = [dt_command, "gnai", "chat", "--prompt", prompt_text]
+    else:
+        cmd = [dt_command, "gnai", "ask", prompt_text]
     # Per session policy: only pass conversation id, never force assistant from bridge.
     if conversation_id:
         cmd.extend(["--conversation-id", str(conversation_id)])
