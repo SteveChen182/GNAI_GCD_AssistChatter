@@ -51,6 +51,12 @@ def _echo_assistant_output(text, append_newline=False):
         sys.stdout.flush()
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-9;]*[mGKHF]|\][^\x07]*\x07|[()][AB]|[=>]|[A-Z])", re.IGNORECASE)
+
+def _strip_ansi(text):
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
 def _short(text, limit=280):
     value = (text or "").replace("\r", " ").replace("\n", " ").strip()
     if len(value) <= limit:
@@ -995,7 +1001,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     self,
                     {
                         "type": "chunk",
-                        "delta": delta_text,
+                        "delta": _strip_ansi(delta_text),
                     },
                 )
 
