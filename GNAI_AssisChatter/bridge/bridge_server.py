@@ -470,6 +470,9 @@ def _run_dt_gnai(prompt_text, assistant=None, conversation_id=None, gnai_mode="a
     )
     _debug(f"dt cmd: {' '.join(cmd)}")
 
+    try:
+        proc = subprocess.Popen(cmd, **_build_dt_popen_kwargs())
+        started = time.time()
         stdout_text = ""
         stderr_text = ""
         while True:
