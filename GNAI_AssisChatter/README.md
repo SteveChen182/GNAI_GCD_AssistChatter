@@ -51,6 +51,42 @@ Chrome Side Panel (UI)
 
 ---
 
+## Quick Start (Colleague Setup)
+
+> If you are installing this for the first time, follow these 3 steps only. No need to read the full Installation section below.
+
+**Before you begin:** Verify that `dt gnai ask "hello"` works in your terminal. If it does, you're ready.
+
+**Step 1 — Clone the repo**
+
+```powershell
+git clone https://github.com/SteveChen182/GNAI_GCD_AssistChatter.git C:\Intel\SightingChatter
+```
+
+> The target path (`C:\Intel\SightingChatter`) must **not contain spaces**. You can choose a different path, but avoid spaces.
+
+**Step 2 — Start the bridge**
+
+```powershell
+C:\Intel\SightingChatter\GNAI_AssisChatter\bridge\run_bridge.ps1
+```
+
+The first run will automatically:
+- Copy the sighting toolkit to `C:\dt_sighting`
+- Update `~/.gnai/config.yaml` to point to `C:\dt_sighting`
+- Start the local bridge server on port 8775
+
+Keep this PowerShell window open while using the extension.
+
+**Step 3 — Load the extension in Chrome**
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked** → select `C:\Intel\SightingChatter\GNAI_AssisChatter`
+4. Open the side panel and click **Debug Connection** to verify the bridge is `🟢 Ready`
+
+---
+
 ## Installation
 
 ### Step 1 — Load the extension in Chrome
