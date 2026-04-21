@@ -6,8 +6,12 @@ if ($klistStr -match "Cached Tickets" -or $klistStr -match "krbtgt") {
 } else {
     Write-Warning "[bridge] No valid Kerberos ticket found."
     Write-Warning "[bridge] This will cause authentication errors when calling dt gnai."
-    Write-Warning "[bridge] Please run 'kinit' in this (non-admin) PowerShell window first, then re-run this script."
-    Write-Warning "[bridge] Note: if you previously ran 'kinit' in an admin PowerShell, the ticket is NOT shared with this session."
+    Write-Warning "[bridge] To refresh your Kerberos ticket, try one of the following:"
+    Write-Warning "[bridge]   Option 1: Lock your Windows screen (Win+L) and unlock it to re-authenticate."
+    Write-Warning "[bridge]   Option 2: If MIT Kerberos for Windows is installed, run kinit.exe from its install folder."
+    Write-Warning "[bridge]             Common path: C:\Program Files\MIT\Kerberos\bin\kinit.exe"
+    Write-Warning "[bridge]   Option 3: Run 'dt auth login' if your dt CLI has an auth command."
+    Write-Warning "[bridge] Note: if your ticket was obtained in an admin PowerShell, it is NOT shared with this session."
     $confirm = Read-Host "[bridge] Continue anyway? (y/N)"
     if ($confirm -ne "y" -and $confirm -ne "Y") {
         exit 1

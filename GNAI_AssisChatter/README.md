@@ -206,14 +206,18 @@ GNAI_AssisChatter/
 
 **Cause:** Windows maintains separate Kerberos credential caches for admin (elevated) and non-admin sessions. If `kinit` was run in an admin PowerShell window, the ticket is **not available** to non-admin processes — and vice versa.
 
-**Fix:** Run `kinit` and `run_bridge.ps1` in the **same session type** (both non-admin, or both admin):
+**Fix:** Refresh your Kerberos ticket using one of the following methods, then re-run `run_bridge.ps1` in the same window:
 
-```powershell
-# In the same (non-admin) PowerShell window:
-kinit
-.\run_bridge.ps1
-```
+- **Option 1 (easiest):** Lock your Windows screen (`Win+L`) and log back in. Windows will renew your ticket automatically.
+- **Option 2:** If MIT Kerberos for Windows is installed, run `kinit` from its install folder:
+  ```powershell
+  & "C:\Program Files\MIT\Kerberos\bin\kinit.exe"
+  .\run_bridge.ps1
+  ```
+- **Option 3:** Run `dt auth login` if your `dt` CLI supports it.
 
+> **Note:** `kinit` is **not** a built-in Windows command. It requires MIT Kerberos for Windows to be installed.
+>
 > `run_bridge.ps1` will automatically check for a valid Kerberos ticket at startup and warn you if none is found.
 
 ---
@@ -425,14 +429,18 @@ GNAI_AssisChatter/
 
 **原因：** Windows 對 admin（elevated）和一般 session 分別維護獨立的 Kerberos credential cache。若 `kinit` 是在 admin PowerShell 執行，一般 session 的 process **無法存取**該 ticket，反之亦然。
 
-**解法：** 在**同一個 session 類型**（同為非 admin，或同為 admin）執行 `kinit` 和 `run_bridge.ps1`：
+**解法：** 用以下任一方式刷新 Kerberos ticket，然後在同一個視窗重新執行 `run_bridge.ps1`：
 
-```powershell
-# 在同一個（非 admin）PowerShell 視窗執行：
-kinit
-.\run_bridge.ps1
-```
+- **選項一（最簡單）：** 按 `Win+L` 鎖定螢幕再登入，Windows 會自動更新 ticket。
+- **選項二：** 若有安裝 MIT Kerberos for Windows，從安裝目錄執行 `kinit`：
+  ```powershell
+  & "C:\Program Files\MIT\Kerberos\bin\kinit.exe"
+  .\run_bridge.ps1
+  ```
+- **選項三：** 若 `dt` CLI 支援，執行 `dt auth login`。
 
+> **注意：** `kinit` **不是** Windows 內建指令，需要安裝 MIT Kerberos for Windows 才能使用。
+>
 > `run_bridge.ps1` 啟動時會自動檢查 Kerberos ticket 是否有效，若無效會顯示警告。
 
 ---
