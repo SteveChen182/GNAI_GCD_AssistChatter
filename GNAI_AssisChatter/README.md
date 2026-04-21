@@ -211,6 +211,26 @@ GNAI_AssisChatter/
 
 ---
 
+## Troubleshooting
+
+### Kerberos Authentication Error
+
+**Symptom:** The bridge starts successfully but `dt gnai ask` returns a Kerberos authentication error.
+
+**Cause:** Windows maintains separate Kerberos credential caches for admin (elevated) and non-admin sessions. If `kinit` was run in an admin PowerShell window, the ticket is **not available** to non-admin processes — and vice versa.
+
+**Fix:** Run `kinit` and `run_bridge.ps1` in the **same session type** (both non-admin, or both admin):
+
+```powershell
+# In the same (non-admin) PowerShell window:
+kinit
+.\run_bridge.ps1
+```
+
+> `run_bridge.ps1` will automatically check for a valid Kerberos ticket at startup and warn you if none is found.
+
+---
+
 ## License
 
 Intel Internal — Not for external distribution.
