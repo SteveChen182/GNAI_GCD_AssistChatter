@@ -118,10 +118,10 @@ let gnaiMode = "ask"; // "ask" | "chat"
 
 // ── Quick action buttons shown after first AI response ──────────────────────
 const QUICK_ACTIONS = [
-  { label: "最新狀況",           prompt: (id) => `請說明 HSD ${id} 目前的最新狀況，包含問題描述與進度。` },
-  { label: "測試環境",           prompt: (id) => `請描述 HSD ${id} 的測試環境，包含硬體、OS、驅動版本等資訊。` },
-  { label: "最新的 action request", prompt: (id) => `請列出 HSD ${id} 目前最新的 action request 是什麼。` },
-  { label: "下一步建議",         prompt: (id) => `根據 HSD ${id} 的現況，請建議下一步的行動方向。` },
+  { label: "Latest Status",      prompt: (id) => `Please summarize the latest status of HSD ${id}, including problem description and current progress.` },
+  { label: "Test Environment",   prompt: (id) => `Please describe the test environment for HSD ${id}, including hardware, OS, and driver version.` },
+  { label: "Latest Action Request", prompt: (id) => `What is the latest action request for HSD ${id}?` },
+  { label: "Next Step",          prompt: (id) => `Based on the current status of HSD ${id}, what is the recommended next action?` },
 ];
 let streamRenderState = null;
 let streamRealtimeFormatting = false;
