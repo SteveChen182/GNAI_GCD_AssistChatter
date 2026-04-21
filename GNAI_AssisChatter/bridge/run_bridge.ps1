@@ -1,3 +1,20 @@
+# -- Kerberos ticket check ---------------------------------------------------
+$klistOutput = & klist 2>&1
+$klistStr = $klistOutput -join "`n"
+if ($klistStr -match "Cached Tickets" -or $klistStr -match "krbtgt") {
+    Write-Host "[bridge] Kerberos ticket OK"
+} else {
+    Write-Warning "[bridge] No valid Kerberos ticket found."
+    Write-Warning "[bridge] This will cause authentication errors when calling dt gnai."
+    Write-Warning "[bridge] Please run 'kinit' in this (non-admin) PowerShell window first, then re-run this script."
+    Write-Warning "[bridge] Note: if you previously ran 'kinit' in an admin PowerShell, the ticket is NOT shared with this session."
+    $confirm = Read-Host "[bridge] Continue anyway? (y/N)"
+    if ($confirm -ne "y" -and $confirm -ne "Y") {
+        exit 1
+    }
+}
+# -----------------------------------------------------------------------------
+
 # -- Kill any existing bridge on port 8775 ----------------------------------
 $existingPid = (netstat -ano | Select-String ":8775\s.*LISTENING") -replace ".*\s(\d+)$", '$1' | Select-Object -First 1
 if ($existingPid) {
