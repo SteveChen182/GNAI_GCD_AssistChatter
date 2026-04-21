@@ -151,7 +151,24 @@ UI 採單頁聊天面板，結構分為:
 
 ---
 
-## 6. 架構優點
+## 6. Quick Action Buttons（GNAI_AssisChatter）
+
+定義位置：`GNAI_AssisChatter/sidepanel.js` — `QUICK_ACTIONS` 陣列（第 120 行附近）
+
+最後更新：2026-04-21
+
+| 標籤（Label） | 按下後填入 input 顯示的文字 | 實際送出的 Prompt |
+|---|---|---|
+| **Last Status & Action** | `Summarize the latest status and action request for HSD {id}` | `Please summarize the latest status of HSD {id}, including the current problem description, progress, and the most recent action request.` |
+| **Test Environment** | `Describe the test environment for HSD {id}` | `Please describe the test environment for HSD {id}, including hardware platform, OS version, driver version, and any relevant configuration details.` |
+| **Next Step** | `What is the recommended next step for HSD {id}?` | `Based on the current status and findings of HSD {id}, what is the recommended next action or investigation step?` |
+| **Potential Duplicated Issue** | `Find potential duplicate issues for HSD {id}` | `Please check if HSD {id} has any potential duplicate or related sightings. Look for similar symptoms, affected platforms, or known issues that may overlap.` |
+
+> 注意：「按下後填入 input 顯示的文字」目前在 code 中並非獨立欄位，實際上 input 填入的即為完整 prompt。此欄為供人閱讀的簡短描述。
+
+---
+
+## 7. 架構優點
 
 1. 模組邊界清晰
 - UI（sidepanel）與 API 呼叫（background）分離

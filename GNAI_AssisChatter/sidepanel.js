@@ -118,10 +118,10 @@ let gnaiMode = "ask"; // "ask" | "chat"
 
 // ── Quick action buttons shown after first AI response ──────────────────────
 const QUICK_ACTIONS = [
-  { label: "Latest Status",      prompt: (id) => `Please summarize the latest status of HSD ${id}, including problem description and current progress.` },
-  { label: "Test Environment",   prompt: (id) => `Please describe the test environment for HSD ${id}, including hardware, OS, and driver version.` },
-  { label: "Latest Action Request", prompt: (id) => `What is the latest action request for HSD ${id}?` },
-  { label: "Next Step",          prompt: (id) => `Based on the current status of HSD ${id}, what is the recommended next action?` },
+  { label: "Last Status & Action", prompt: (id) => `Please summarize the latest status of HSD ${id}, including the current problem description, progress, and the most recent action request.` },
+  { label: "Test Environment",    prompt: (id) => `Please describe the test environment for HSD ${id}, including hardware platform, OS version, driver version, and any relevant configuration details.` },
+  { label: "Next Step",           prompt: (id) => `Based on the current status and findings of HSD ${id}, what is the recommended next action or investigation step?` },
+  { label: "Potential Duplicated Issue", prompt: (id) => `Please check if HSD ${id} has any potential duplicate or related sightings. Look for similar symptoms, affected platforms, or known issues that may overlap.` },
 ];
 let streamRenderState = null;
 let streamRealtimeFormatting = false;
