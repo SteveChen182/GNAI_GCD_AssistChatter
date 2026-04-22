@@ -102,6 +102,7 @@ $env:GNAI_BRIDGE_ECHO_RESPONSE = "1"
 $env:GNAI_BRIDGE_MAX_FOLLOWUP_ROUNDS = "0"
 $env:GNAI_BRIDGE_STREAM_EMIT_INTERVAL_SECONDS = "0.5"
 $env:GNAI_BRIDGE_STREAM_READ_CHARS = "1024"
+$env:GNAI_HIDE_THOUGHTS = "1"  # suppress AI internal reasoning/thinking output
 # Optional:
 # $env:GNAI_BRIDGE_API_KEY = "your-local-bridge-token"
 
