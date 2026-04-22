@@ -1166,6 +1166,14 @@ async function openHistoryMenu() {
 async function restoreSession(entry) {
   if (!entry?.hsdId) return;
 
+  // If currently waiting for a response, confirm before switching
+  if (isSending) {
+    const confirmed = confirm(
+      "A request is still in progress. Switching session will abort the current request.\n\nSwitch anyway?"
+    );
+    if (!confirmed) return;
+  }
+
   await saveSessionToHistory();
 
   chatGeneration += 1;
