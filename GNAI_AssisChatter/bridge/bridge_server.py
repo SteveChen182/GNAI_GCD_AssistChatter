@@ -51,7 +51,12 @@ def _echo_assistant_output(text, append_newline=False):
         sys.stdout.flush()
 
 
-_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-9;]*[mGKHF]|\][^\x07]*\x07|[()][AB]|[=>]|[A-Z])", re.IGNORECASE)
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;]*[A-Za-z]"   # standard CSI: ESC [ ... letter  (e.g. \x1b[2m)
+    r"|\x1b[^[\x1b]"            # other ESC sequences (ESC + single char)
+    r"|\[[0-9;]+m",             # bare [Nm] / [N;Nm] without ESC (when ESC is stripped upstream)
+    re.IGNORECASE
+)
 
 def _strip_ansi(text):
     return _ANSI_ESCAPE_RE.sub("", text)
