@@ -500,10 +500,18 @@ function extractHsdIdFromHsdesUrl(url) {
 
 async function importHsdIdFromWebpage() {
   try {
-    if (activeHsdId) {
+    // If a request is in progress, warn user first
+    if (isSending) {
+      const confirmed = confirm(
+        "A request is still in progress. Importing a new HSD will abort the current request.\n\nContinue?"
+      );
+      if (!confirmed) return;
+    } else if (activeHsdId) {
       const shouldContinue = window.confirm(t("reimportHsdConfirm"));
       if (!shouldContinue) return;
+    }
 
+    if (activeHsdId) {
       await saveSessionToHistory();
       chatGeneration += 1;
       await cancelSending();
